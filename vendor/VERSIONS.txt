@@ -1,0 +1,5 @@
+marked 18.0.14 (npm, MIT) — marked.esm.js
+dompurify 3.4.16 (npm, Apache-2.0 / MPL-2.0) — purify.es.mjs
+
+0eab1f03c00471183d1b79febacfdca34e3f4bf506d25720883c682780f9e5e1 *marked.esm.js
+9c52577e368cdc6f3fb2bc87de222c8139e30655eef54a2bebde6d4b0a85ccb8 *purify.es.mjs

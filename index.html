@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://api.github.com https://raw.githubusercontent.com; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Carnet</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div id="lock" class="lock">
+    <form id="unlock-form" class="lock-box" autocomplete="on">
+      <h1>Carnet</h1>
+      <label for="pass">Phrase de passe</label>
+      <input id="pass" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button type="submit">Déverrouiller</button>
+      <p id="lock-msg" class="msg" role="status"></p>
+    </form>
+  </div>
+
+  <div id="app" hidden>
+    <header class="bar">
+      <button id="btn-side" class="icon" title="Afficher les notes" aria-label="Afficher les notes">☰</button>
+      <div class="title"><span id="crumb" class="crumb"></span><span id="note-title"></span></div>
+      <div class="actions">
+        <button id="btn-new" title="Nouvelle note">＋</button>
+        <button id="btn-edit">Modifier</button>
+        <button id="btn-save" class="primary" hidden>Enregistrer</button>
+        <button id="btn-cancel" hidden>Annuler</button>
+        <button id="btn-refresh" class="icon" title="Recharger le carnet" aria-label="Recharger">↻</button>
+        <button id="btn-lock" title="Verrouiller">Verrouiller</button>
+      </div>
+    </header>
+    <div class="body">
+      <aside id="side">
+        <input id="filter" type="search" placeholder="Filtrer les notes…" autocomplete="off" spellcheck="false">
+        <section id="recents"></section>
+        <nav id="tree"></nav>
+      </aside>
+      <main id="main">
+        <div id="banner" class="banner" hidden></div>
+        <article id="view" class="note"></article>
+        <textarea id="editor" hidden spellcheck="true" aria-label="Texte de la note"></textarea>
+      </main>
+    </div>
+    <footer id="status" class="status" role="status"></footer>
+  </div>
+
+  <dialog id="dlg">
+    <form method="dialog" id="dlg-form">
+      <h2 id="dlg-title"></h2>
+      <div id="dlg-body"></div>
+      <div id="dlg-buttons" class="dlg-buttons"></div>
+    </form>
+  </dialog>
+</body>
+</html>
