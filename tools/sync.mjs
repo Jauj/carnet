@@ -74,7 +74,9 @@ function acquireLock() {
     if (age < 15 * 60 * 1000) throw new Error("Une synchronisation est déjà en cours (sync.lock).");
     fs.writeFileSync(LOCK_FILE, String(process.pid));
   }
-  return () => fs.rmSync(LOCK_FILE, { force: true });
+  const release = () => fs.rmSync(LOCK_FILE, { force: true });
+  process.once("exit", release); // même en cas de sortie imprévue, le verrou ne reste pas
+  return release;
 }
 
 // ---------- vault local ----------
@@ -200,9 +202,15 @@ function commitAndPush(cfg, message, { force = false } = {}) {
 
 function askHidden(prompt) {
   if (process.env.CARNET_TEST_PASSPHRASE) return Promise.resolve(process.env.CARNET_TEST_PASSPHRASE);
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const stdin = process.stdin;
     process.stdout.write(prompt);
+    // Si l'entrée se ferme sans réponse, on s'arrête proprement au lieu de quitter en silence.
+    const keepAlive = setInterval(() => {}, 1 << 30);
+    const done = (fn) => (v) => { clearInterval(keepAlive); stdin.off("end", onEnd); fn(v); };
+    const onEnd = () => done(reject)(new Error("Saisie interrompue : aucune phrase de passe reçue."));
+    stdin.once("end", onEnd);
+    resolve = done(resolve);
     stdin.setEncoding("utf8");
     if (!stdin.isTTY) {
       let buf = "";

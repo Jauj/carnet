@@ -257,22 +257,74 @@ function renderTree() {
     }
     node.notes.push(p);
   }
-  const build = (node, container) => {
+  const build = (node, container, prefix = "") => {
     for (const [name, child] of [...node.dirs].sort((a, b) => collator.compare(a[0], b[0]))) {
       const det = document.createElement("details");
       const sum = document.createElement("summary");
-      sum.textContent = name;
+      const folder = prefix ? `${prefix}/${name}` : name;
+      sum.append(Object.assign(document.createElement("span"), { textContent: name }), menuButton(folder));
       const inner = document.createElement("div");
       det.append(sum, inner);
       // Contenu construit à la première ouverture : l'arborescence reste légère.
-      det.addEventListener("toggle", () => { if (det.open && !inner.childElementCount) build(child, inner); });
+      det.addEventListener("toggle", () => { if (det.open && !inner.childElementCount) build(child, inner, folder); });
       container.append(det);
     }
     for (const p of node.notes.sort((a, b) => collator.compare(baseName(a), baseName(b)))) container.append(noteLink(p));
   };
   const tree = $("tree");
-  tree.innerHTML = `<h3>Toutes les notes (${Object.keys(S.manifest.notes).length})</h3>`;
+  tree.innerHTML = "";
+  const h = document.createElement("h3");
+  h.textContent = `Toutes les notes (${Object.keys(S.manifest.notes).length})`;
+  h.append(menuButton(""));
+  tree.append(h);
   build(root, tree);
+}
+
+// ---------- menu déroulant « ⋯ » des dossiers ----------
+function menuButton(folder) {
+  const b = document.createElement("button");
+  b.className = "menu-btn";
+  b.textContent = "⋯";
+  b.title = "Actions sur ce dossier";
+  b.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); openMenu(b, folder); });
+  return b;
+}
+
+function openMenu(anchor, folder) {
+  closeMenu();
+  const m = document.createElement("div");
+  m.id = "menu";
+  m.className = "menu";
+  const where = folder || "la racine";
+  const items = [
+    ["📝 Nouvelle note ici", () => offerCreate("", folder, { lockFolder: true })],
+    ["📁 Nouveau dossier ici", () => offerFolder(folder)],
+  ];
+  m.append(Object.assign(document.createElement("div"), { className: "menu-head", textContent: where }));
+  for (const [label, fn] of items) {
+    const it = document.createElement("button");
+    it.textContent = label;
+    it.addEventListener("click", () => { closeMenu(); fn(); });
+    m.append(it);
+  }
+  document.body.append(m);
+  const r = anchor.getBoundingClientRect();
+  m.style.top = `${Math.min(r.bottom + 2, innerHeight - m.offsetHeight - 8)}px`;
+  m.style.left = `${Math.min(r.left, innerWidth - m.offsetWidth - 8)}px`;
+  setTimeout(() => document.addEventListener("click", closeMenu, { once: true }), 0);
+}
+function closeMenu() { $("menu")?.remove(); }
+
+async function offerFolder(parent) {
+  const res = await ask("Nouveau dossier", `
+    <p>Dans : <b>${esc(parent || "racine")}</b></p>
+    <label for="fd">Nom du dossier</label><input id="fd" name="dir" type="text">
+    <label for="fn">Première note</label><input id="fn" name="name" type="text" value="Index">
+    <p class="hint">Un dossier existe dès qu'il contient une note.</p>`,
+  [["cancel", "Annuler"], ["ok", "Créer", true]], { input: true });
+  if (res.choice !== "ok" || !res.dir.trim()) return;
+  if (/[\\:*?"<>|/]/.test(res.dir) || res.dir.trim().startsWith(".")) return status("Nom de dossier invalide.", "error");
+  startNew((parent ? parent + "/" : "") + res.dir.trim(), res.name || "Index");
 }
 
 $("filter").addEventListener("input", () => {
@@ -467,12 +519,77 @@ function scrollToHeading(anchor) {
 }
 
 // ---------- édition ----------
+// ---------- barre d'outils Markdown ----------
+const TOOLS = [
+  ["B", "Gras", (t) => wrap("**", "**", "texte en gras")],
+  ["I", "Italique", (t) => wrap("*", "*", "texte en italique")],
+  ["S", "Barré", (t) => wrap("~~", "~~", "texte barré")],
+  ["H1", "Titre 1", () => linePrefix("# ")],
+  ["H2", "Titre 2", () => linePrefix("## ")],
+  ["H3", "Titre 3", () => linePrefix("### ")],
+  ["•", "Liste à puces", () => linePrefix("- ")],
+  ["1.", "Liste numérotée", () => linePrefix("1. ")],
+  ["☐", "Case à cocher", () => linePrefix("- [ ] ")],
+  ["❝", "Citation", () => linePrefix("> ")],
+  ["[[ ]]", "Lien vers une note", () => wrap("[[", "]]", "Note")],
+  ["🔗", "Lien web", () => wrap("[", "](https://)", "texte du lien")],
+  ["</>", "Code", () => wrap("`", "`", "code")],
+  ["ⓘ", "Encadré (callout)", () => linePrefix("> [!info] ")],
+  ["―", "Ligne de séparation", () => insert("\n---\n")],
+  ["▦", "Tableau", () => insert("\n| Colonne | Colonne |\n|---|---|\n| | |\n")],
+];
+function edState() { const ed = $("editor"); return { ed, a: ed.selectionStart, b: ed.selectionEnd, v: ed.value }; }
+function commit(ed, v, selA, selB) {
+  ed.focus();
+  ed.setSelectionRange(0, ed.value.length);
+  // execCommand garde l'annulation (Ctrl+Z) ; repli si indisponible.
+  if (!document.execCommand?.("insertText", false, v)) ed.value = v;
+  ed.setSelectionRange(selA, selB);
+  S.dirty = true;
+}
+function wrap(pre, post, placeholder) {
+  const { ed, a, b, v } = edState();
+  const sel = v.slice(a, b) || placeholder;
+  commit(ed, v.slice(0, a) + pre + sel + post + v.slice(b), a + pre.length, a + pre.length + sel.length);
+}
+function linePrefix(prefix) {
+  const { ed, a, b, v } = edState();
+  const start = v.lastIndexOf("\n", a - 1) + 1;
+  const block = v.slice(start, b);
+  const lines = block.split("\n");
+  const all = lines.every((l) => l.startsWith(prefix));
+  const out = lines.map((l) => (all ? l.slice(prefix.length) : prefix + l.replace(/^(#{1,6} |- \[ \] |- |1\. |> )/, ""))).join("\n");
+  commit(ed, v.slice(0, start) + out + v.slice(b), start, start + out.length);
+}
+function insert(text) {
+  const { ed, a, b, v } = edState();
+  commit(ed, v.slice(0, a) + text + v.slice(b), a + text.length, a + text.length);
+}
+(() => {
+  const bar = $("toolbar");
+  for (const [label, title, fn] of TOOLS) {
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.textContent = label; btn.title = title;
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    btn.addEventListener("click", fn);
+    bar.append(btn);
+  }
+})();
+document.addEventListener("keydown", (ev) => {
+  if (!S.editing || !(ev.ctrlKey || ev.metaKey)) return;
+  const k = ev.key.toLowerCase();
+  if (k === "b") { ev.preventDefault(); wrap("**", "**", "texte en gras"); }
+  if (k === "i") { ev.preventDefault(); wrap("*", "*", "texte en italique"); }
+  if (k === "k") { ev.preventDefault(); wrap("[[", "]]", "Note"); }
+});
+
 function startEdit(text) {
   S.editing = true;
   S.dirty = false;
   const ed = $("editor");
   ed.value = text;
   ed.hidden = false;
+  $("toolbar").hidden = false;
   $("view").hidden = true;
   $("btn-edit").hidden = true;
   $("btn-save").hidden = false;
@@ -484,6 +601,7 @@ function stopEdit() {
   S.editing = false;
   S.dirty = false;
   $("editor").hidden = true;
+  $("toolbar").hidden = true;
   $("view").hidden = false;
   $("btn-save").hidden = true;
   $("btn-cancel").hidden = true;
@@ -614,14 +732,18 @@ function cleanNewPath(folder, name) {
   return (f ? f + "/" : "") + n + ".md";
 }
 
-async function offerCreate(target, folder) {
+async function offerCreate(target, folder, { lockFolder = false } = {}) {
   const defFolder = folder ?? (S.current ? dirName(S.current.path) : "");
   const res = await ask("Nouvelle note", `
-    <label for="nf">Dossier</label><input id="nf" name="folder" type="text" value="${esc(defFolder)}" spellcheck="false">
+    <label for="nf">Dossier</label><input id="nf" name="folder" type="text" value="${esc(defFolder)}" spellcheck="false"${lockFolder ? " readonly" : ""}>
     <label for="nn">Nom</label><input id="nn" name="name" type="text" value="${esc(target ? baseName(target) : "")}">`,
   [["cancel", "Annuler"], ["ok", "Créer", true]], { input: true });
   if (res.choice !== "ok") return;
-  const path = cleanNewPath(res.folder, res.name);
+  startNew(res.folder, res.name);
+}
+
+function startNew(folder, name) {
+  const path = cleanNewPath(folder, name);
   if (!path) return status("Nom ou dossier invalide (caractères interdits, ou dossier caché).", "error");
   const existing = Object.keys(S.manifest.notes).find((p) => p.toLowerCase() === path.toLowerCase());
   if (existing) return openNote(existing);

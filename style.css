@@ -108,3 +108,25 @@ dialog p { margin: 6px 0; }
   .bar { padding: 6px 8px; gap: 6px; }
   #btn-lock { padding: 5px 7px; }
 }
+
+/* Menu déroulant des dossiers */
+#side summary { display: flex; align-items: center; gap: 4px; }
+#side summary span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tree h3 { display: flex; align-items: center; justify-content: space-between; }
+.menu-btn { border: 0; padding: 0 6px; line-height: 1.4; color: var(--muted); opacity: .55; font-size: 1em; }
+#side summary:hover .menu-btn, #tree h3 .menu-btn, .menu-btn:focus { opacity: 1; }
+.menu-btn:hover { background: var(--bg); color: var(--fg); }
+.menu { position: fixed; z-index: 20; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.18); padding: 4px; min-width: 200px; display: flex; flex-direction: column; }
+.menu-head { font-size: .75em; color: var(--muted); padding: 4px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.menu button { border: 0; text-align: left; padding: 7px 10px; border-radius: 5px; }
+.menu button:hover { background: var(--side); }
+dialog .hint { font-size: .85em; color: var(--muted); }
+
+/* Barre d'outils d'édition */
+.toolbar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 12px;
+  background: var(--side); border-bottom: 1px solid var(--line); }
+.toolbar button { padding: 3px 8px; min-width: 32px; font-size: .9em; background: var(--bg); }
+.toolbar button:nth-child(1) { font-weight: 700; }
+.toolbar button:nth-child(2) { font-style: italic; }
+.toolbar button:nth-child(3) { text-decoration: line-through; }
