@@ -2,8 +2,9 @@
 // Carnet — synchronisation du vault Obsidian (en clair, sur le PC) avec la branche chiffrée du dépôt GitHub.
 //
 //   node sync.mjs init [--generer] [--force]   crée le carnet chiffré à partir du vault (une seule fois)
-//   node sync.mjs sync [--autoriser-suppressions]
+//   node sync.mjs sync [--memoriser] [--autoriser-suppressions]
 //   node sync.mjs status                       ce que ferait sync, sans rien modifier
+//   node sync.mjs oublier                      efface la clé mémorisée par --memoriser
 //
 // Synchronisation à trois états : L (vault), R (manifeste distant), S (dernier état commun, state.json).
 // Rien n'est jamais perdu : en cas de double modification, la version web est gardée en copie « conflit » ;
@@ -21,6 +22,7 @@ const CONFIG_FILE = path.join(HOME, "config.json");
 const STATE_FILE = path.join(HOME, "state.json");
 const LOCK_FILE = path.join(HOME, "sync.lock");
 const LOG_FILE = path.join(HOME, "sync.log");
+const KEY_FILE = path.join(HOME, "cle.dpapi");
 const MIN_PASSPHRASE = 25;
 
 const DEFAULTS = {
@@ -198,6 +200,48 @@ function commitAndPush(cfg, message, { force = false } = {}) {
   throw new Error(`Envoi refusé par GitHub :\n${r.stderr.trim()}`);
 }
 
+// ---------- clé mémorisée (Windows DPAPI) ----------
+// Le secret maître est chiffré par Windows pour ce seul compte, sur ce seul PC. Le vault y est déjà en clair :
+// cela ne donne rien de plus à qui ouvre la session, et permet une synchronisation sans saisie.
+
+function dpapi(op, b64) {
+  if (process.env.CARNET_TEST_FAKE_DPAPI) return b64; // tests hors Windows
+  if (process.platform !== "win32") throw new Error("La clé ne peut être mémorisée que sous Windows (DPAPI).");
+  const script = "Add-Type -AssemblyName System.Security; " +
+    "$d = [Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()); " +
+    `[Convert]::ToBase64String([Security.Cryptography.ProtectedData]::${op}($d, [Text.Encoding]::UTF8.GetBytes('carnet'), 'CurrentUser'))`;
+  const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { input: b64, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`DPAPI (${op}) a échoué : ${(r.stderr || r.error?.message || "").trim()}`);
+  return r.stdout.trim();
+}
+
+async function getKeys(header, opts) {
+  if (fs.existsSync(KEY_FILE)) {
+    let master = null;
+    try { master = C.fromBase64(dpapi("Unprotect", fs.readFileSync(KEY_FILE, "utf8"))); }
+    catch (err) { console.log(`${err.message}\nLa phrase de passe est demandée à la place.`); }
+    if (master) {
+      try {
+        const keys = await C.unlockMaster(header, master);
+        if (opts.memoriser) console.log("La clé est déjà mémorisée.");
+        return keys;
+      } catch {
+        fs.rmSync(KEY_FILE, { force: true });
+        console.log("La clé mémorisée ne correspond plus au carnet (recréé ?) : elle est oubliée.");
+      }
+    }
+  }
+  const pass = await askHidden("Phrase de passe du carnet : ");
+  console.log("Déverrouillage…");
+  const master = await C.masterFor(header, pass);
+  const keys = await C.unlockMaster(header, master);
+  if (opts.memoriser) {
+    fs.writeFileSync(KEY_FILE, dpapi("Protect", C.toBase64(master)));
+    console.log("Clé mémorisée sur ce PC : les prochaines synchronisations ne demanderont plus la phrase.");
+  }
+  return keys;
+}
+
 // ---------- saisie de la phrase de passe ----------
 
 function askHidden(prompt) {
@@ -341,6 +385,7 @@ async function cmdInit(cfg, opts) {
   const files = {};
   for (const p of paths) files[p] = { sha: L[p].sha, size: L[p].size, mtimeMs: L[p].mtimeMs };
   saveState({ files, lastSync: new Date().toISOString() });
+  fs.rmSync(KEY_FILE, { force: true }); // nouveau sel : l'ancienne clé mémorisée ne vaut plus rien
   log(`init ${paths.length} notes`);
   console.log(`\nCarnet créé : ${paths.length} notes chiffrées et envoyées.`);
 }
@@ -355,11 +400,7 @@ async function cmdSync(cfg, opts) {
     refreshClone(cfg);
     const cwd = cfg.dataDir;
     const header = JSON.parse(fs.readFileSync(path.join(cwd, "vault.json"), "utf8"));
-    if (!keys) {
-      const pass = await askHidden("Phrase de passe du carnet : ");
-      console.log("Déverrouillage…");
-      keys = await C.unlock(header, pass);
-    }
+    if (!keys) keys = await getKeys(header, opts);
     const remote = await C.decryptManifest(keys.enc, fs.readFileSync(path.join(cwd, "manifest.bin")));
     const R = {};
     let ignored = 0;
@@ -507,12 +548,19 @@ async function main() {
     generer: rest.includes("--generer"),
     force: rest.includes("--force"),
     allowDeletes: rest.includes("--autoriser-suppressions"),
+    memoriser: rest.includes("--memoriser"),
     dryRun: cmd === "status",
   };
   const it = rest.indexOf("--iterations");
   if (it >= 0) opts.iterations = Number(rest[it + 1]);
+  if (cmd === "oublier") {
+    const had = fs.existsSync(KEY_FILE);
+    fs.rmSync(KEY_FILE, { force: true });
+    console.log(had ? "Clé mémorisée effacée : la phrase de passe sera redemandée." : "Aucune clé mémorisée.");
+    return;
+  }
   if (!["init", "sync", "status"].includes(cmd)) {
-    console.log("Usage : node sync.mjs init [--generer] | sync [--autoriser-suppressions] | status");
+    console.log("Usage : node sync.mjs init [--generer] | sync [--memoriser] [--autoriser-suppressions] | status | oublier");
     process.exitCode = 2;
     return;
   }

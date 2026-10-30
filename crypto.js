@@ -77,11 +77,15 @@ export function normPath(p) {
 
 // ---------- clés ----------
 
-// Phrase de passe -> PBKDF2-SHA256 -> secret maître -> HKDF -> trois clés indépendantes :
+// Phrase de passe -> PBKDF2-SHA256 -> secret maître (32 octets) -> HKDF -> trois clés indépendantes :
 // enc (AES-GCM, fichiers), name (HMAC, noms de fichiers), local (AES-GCM, jeton et brouillons du navigateur).
-export async function deriveKeys(passphrase, salt, iterations) {
+// Le secret maître seul peut être mémorisé sur le PC (sync --memoriser) : il évite de refaire PBKDF2.
+export async function deriveMaster(passphrase, salt, iterations) {
   const base = await subtle.importKey("raw", utf8(passphrase.normalize("NFC")), "PBKDF2", false, ["deriveBits"]);
-  const master = await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, base, 256);
+  return new Uint8Array(await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, base, 256));
+}
+
+export async function keysFromMaster(master) {
   const hk = await subtle.importKey("raw", master, "HKDF", false, ["deriveKey"]);
   const sub = (info, alg, usages) => subtle.deriveKey(
     { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf8("carnet/v1/" + info) },
@@ -91,6 +95,10 @@ export async function deriveKeys(passphrase, salt, iterations) {
     name: await sub("name", { name: "HMAC", hash: "SHA-256", length: 256 }, ["sign"]),
     local: await sub("local", { name: "AES-GCM", length: 256 }, ["encrypt", "decrypt"]),
   };
+}
+
+export async function deriveKeys(passphrase, salt, iterations) {
+  return keysFromMaster(await deriveMaster(passphrase, salt, iterations));
 }
 
 // ---------- chiffrement ----------
@@ -134,18 +142,31 @@ export async function createVaultHeader(passphrase, iterations = DEFAULT_ITERATI
   return { header, keys };
 }
 
+export function masterFor(header, passphrase) {
+  checkHeader(header);
+  return deriveMaster(passphrase, fromBase64(header.kdf.salt), header.kdf.iterations);
+}
+
 // Renvoie les clés, ou lève "Phrase de passe incorrecte."
 export async function unlock(header, passphrase) {
-  if (header.format !== "carnet" || header.version !== FORMAT_VERSION) {
-    throw new Error("vault.json : format non reconnu.");
-  }
-  const keys = await deriveKeys(passphrase, fromBase64(header.kdf.salt), header.kdf.iterations);
+  return unlockMaster(header, await masterFor(header, passphrase));
+}
+
+export async function unlockMaster(header, master) {
+  checkHeader(header);
+  const keys = await keysFromMaster(master);
   let ok = false;
   try {
     ok = fromUtf8(await decryptBytes(keys.enc, fromBase64(header.check), "check")) === CHECK_TEXT;
   } catch { ok = false; }
   if (!ok) throw new Error("Phrase de passe incorrecte.");
   return keys;
+}
+
+function checkHeader(header) {
+  if (header.format !== "carnet" || header.version !== FORMAT_VERSION) {
+    throw new Error("vault.json : format non reconnu.");
+  }
 }
 
 // ---------- manifeste ----------

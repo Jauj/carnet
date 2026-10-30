@@ -175,10 +175,12 @@ test("course : B pousse pendant la synchronisation de A, A réessaie et réussit
   write(B.vault, "b.md", "b modifiée par B");
   write(A.vault, "a.md", "a modifiée par A");
   // Le crochet lance la synchronisation de B (avec SON dossier) juste avant l'envoi de A.
-  const hookScript = path.join(env.root, "hook.cmd");
-  fs.writeFileSync(hookScript,
-    `@set CARNET_HOME=${B.home}\r\n@"${process.execPath}" "${TOOL}" sync\r\n`);
-  const r = ok(A.run(["sync"], { CARNET_TEST_HOOK_BEFORE_PUSH: `"${hookScript}"` }));
+  // Script Node plutôt que .cmd : le test tourne aussi hors de Windows.
+  const hookScript = path.join(env.root, "hook.mjs");
+  fs.writeFileSync(hookScript, `import { spawnSync } from "node:child_process";
+spawnSync(process.execPath, [${JSON.stringify(TOOL)}, "sync"], { env: { ...process.env, CARNET_HOME: ${JSON.stringify(B.home)} }, stdio: "inherit" });
+`);
+  const r = ok(A.run(["sync"], { CARNET_TEST_HOOK_BEFORE_PUSH: `"${process.execPath}" "${hookScript}"` }));
   assert.match(r.out, /nouvelle tentative/);
   ok(B.sync());
   assert.equal(read(A.vault, "b.md").toString(), "b modifiée par B");
@@ -259,4 +261,25 @@ test("le manifeste déchiffré contient les bons chemins et empreintes", async (
   assert.deepEqual(Object.keys(m.notes), ["é/n.md"]);
   assert.equal(m.notes["é/n.md"].sha, await C.sha256Hex(C.utf8("contenu")));
   assert.equal(m.notes["é/n.md"].id, await C.noteId(keys.name, "é/n.md"));
+});
+
+test("clé mémorisée : sync sans phrase de passe, puis oubli ; clé périmée après un init --force", () => {
+  const env = setup();
+  const A = device(env, "A", { "a.md": "a" });
+  ok(A.init());
+  const fake = { CARNET_TEST_FAKE_DPAPI: "1" };
+  const noPass = { ...fake, CARNET_TEST_PASSPHRASE: "" }; // toute demande de phrase échoue (entrée fermée)
+  assert.match(A.run(["sync"], noPass).out, /Saisie interrompue/);
+  assert.match(ok(A.run(["sync", "--memoriser"], fake)).out, /Clé mémorisée/);
+  write(A.vault, "b.md", "b");
+  assert.match(ok(A.run(["sync"], noPass)).out, /envoyées vers GitHub : 1/);
+  assert.match(ok(A.run(["oublier"])).out, /effacée/);
+  assert.match(A.run(["sync"], noPass).out, /Saisie interrompue/);
+
+  // Une clé qui ne correspond plus au carnet est oubliée, et la phrase est redemandée.
+  ok(A.run(["sync", "--memoriser"], fake));
+  fs.writeFileSync(path.join(A.home, "cle.dpapi"), C.toBase64(C.randomBytes(32)));
+  const r = ok(A.run(["sync"], fake));
+  assert.match(r.out, /ne correspond plus/);
+  assert.ok(!fs.existsSync(path.join(A.home, "cle.dpapi")));
 });

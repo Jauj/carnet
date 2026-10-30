@@ -93,3 +93,15 @@ test("base64 : aller-retour sur un grand tableau", () => {
   const b = C.randomBytes(200000);
   assert.deepEqual(C.fromBase64(C.toBase64(b)), b);
 });
+
+test("secret maître : mêmes clés que la phrase de passe ; un faux secret est refusé", async () => {
+  const pass = "phrase de passe de test assez longue";
+  const { header, keys } = await C.createVaultHeader(pass, IT);
+  const master = await C.masterFor(header, pass);
+  assert.equal(master.length, 32);
+  const viaMaster = await C.unlockMaster(header, master);
+  const blob = await C.encryptBytes(keys.enc, C.utf8("note"), "n/a");
+  assert.equal(C.fromUtf8(await C.decryptBytes(viaMaster.enc, blob, "n/a")), "note");
+  assert.equal(await C.noteId(viaMaster.name, "a.md"), await C.noteId(keys.name, "a.md"));
+  await assert.rejects(C.unlockMaster(header, C.randomBytes(32)), /incorrecte/);
+});

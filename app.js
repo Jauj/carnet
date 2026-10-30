@@ -6,7 +6,8 @@ import { Marked } from "./vendor/marked.esm.js";
 import DOMPurify from "./vendor/purify.es.mjs";
 
 const $ = (id) => document.getElementById(id);
-const REPO = `/repos/${cfg.owner}/${cfg.repo}`;
+const DATA_REPO = cfg.dataRepo || cfg.repo;
+const REPO = `/repos/${cfg.owner}/${DATA_REPO}`;
 const TOKEN_KEY = "carnet.token";
 const DRAFT_KEY = "carnet.draft";
 const ATTACH_RE = /\.(png|jpe?g|gif|svg|webp|bmp|pdf|mp3|m4a|wav|ogg|mp4|webm|docx?|xlsx?|pptx?|odt|epub|zip|canvas)$/i;
@@ -68,7 +69,7 @@ async function latestHead() {
 // Fichier brut à un commit précis (immuable, donc toujours à jour). Quelques secondes de délai
 // sont possibles juste après un enregistrement : on réessaie.
 async function raw(ref, path) {
-  const url = `${cfg.raw}/${cfg.owner}/${cfg.repo}/${ref}/${path}`;
+  const url = `${cfg.raw}/${cfg.owner}/${DATA_REPO}/${ref}/${path}`;
   for (let i = 0; ; i++) {
     const r = await fetch(url, { cache: ref === cfg.branch ? "no-store" : "default" });
     if (r.ok) return new Uint8Array(await r.arrayBuffer());
@@ -112,6 +113,14 @@ function setManifest(m) {
   }
 }
 
+// GitHub Pages ne permet pas l'en-tête frame-ancestors : la page refuse elle-même d'être affichée
+// dans le cadre d'un autre site (qui pourrait piéger la saisie de la phrase de passe).
+if (window.top === window.self) $("lock").hidden = false;
+else {
+  document.body.textContent = "Le carnet ne s'affiche pas dans le cadre d'un autre site. Ouvre-le directement.";
+  throw new Error("Affichage dans un cadre refusé.");
+}
+
 $("unlock-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const msg = $("lock-msg");
@@ -147,6 +156,20 @@ setInterval(() => {
   if (S.keys && Date.now() - lastActivity > cfg.lockMinutes * 60000) lock("Verrouillé après inactivité.");
 }, 20000);
 
+// Onglet en arrière-plan (téléphone rangé, autre application) : verrouillage plus rapide.
+// Le minuteur peut être suspendu par le navigateur, d'où le contrôle aussi au retour.
+const HIDDEN_LOCK_MS = (cfg.hiddenLockMinutes ?? 5) * 60000;
+let hiddenSince = 0, hiddenTimer = 0;
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(hiddenTimer);
+  if (document.hidden) {
+    hiddenSince = Date.now();
+    hiddenTimer = setTimeout(() => { if (S.keys) lock("Verrouillé après un passage en arrière-plan."); }, HIDDEN_LOCK_MS);
+  } else if (S.keys && hiddenSince && Date.now() - hiddenSince >= HIDDEN_LOCK_MS) {
+    lock("Verrouillé après un passage en arrière-plan.");
+  }
+});
+
 async function lock(message = "") {
   if (S.keys && S.editing && S.dirty) {
     const draft = { path: S.current.path, text: $("editor").value, baseSha: S.current.sha, isNew: !!S.current.isNew };
@@ -168,7 +191,11 @@ async function lock(message = "") {
   $("lock-msg").textContent = message.trim();
   $("pass").focus();
 }
-$("btn-lock").addEventListener("click", () => {
+// Maj + clic : oublie aussi le jeton GitHub mémorisé sur cet appareil.
+$("btn-lock").addEventListener("click", (ev) => {
+  if (ev.shiftKey && localStorage.getItem(TOKEN_KEY) && confirm("Oublier le jeton GitHub mémorisé sur cet appareil ?")) {
+    localStorage.removeItem(TOKEN_KEY);
+  }
   if (S.editing && S.dirty && !confirm("Modifications non enregistrées : elles seront gardées en brouillon chiffré. Verrouiller ?")) return;
   lock();
 });
@@ -399,7 +426,7 @@ function showNote() {
   $("note-title").textContent = baseName(c.path);
   $("btn-edit").hidden = false;
   $("btn-edit").disabled = !!c.readOnly;
-  $("view").innerHTML = renderMarkdown(c.text, c.path);
+  $("view").innerHTML = renderMarkdown(c.text);
   decorate($("view"), c.path);
   $("main").scrollTop = 0;
   for (const a of document.querySelectorAll("#side a.active")) a.classList.remove("active");
@@ -436,7 +463,7 @@ md.use({
   },
 });
 
-function renderMarkdown(text, path) {
+function renderMarkdown(text) {
   let body = text.replace(/^﻿/, "");
   let props = "";
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(body);
@@ -445,7 +472,6 @@ function renderMarkdown(text, path) {
     body = body.slice(fm[0].length);
   }
   const html = md.parse(body);
-  void path;
   return props + DOMPurify.sanitize(html, { FORBID_ATTR: ["style"], FORBID_TAGS: ["style", "img"] });
 }
 
@@ -521,9 +547,9 @@ function scrollToHeading(anchor) {
 // ---------- édition ----------
 // ---------- barre d'outils Markdown ----------
 const TOOLS = [
-  ["B", "Gras", (t) => wrap("**", "**", "texte en gras")],
-  ["I", "Italique", (t) => wrap("*", "*", "texte en italique")],
-  ["S", "Barré", (t) => wrap("~~", "~~", "texte barré")],
+  ["B", "Gras", () => wrap("**", "**", "texte en gras")],
+  ["I", "Italique", () => wrap("*", "*", "texte en italique")],
+  ["S", "Barré", () => wrap("~~", "~~", "texte barré")],
   ["H1", "Titre 1", () => linePrefix("# ")],
   ["H2", "Titre 2", () => linePrefix("## ")],
   ["H3", "Titre 3", () => linePrefix("### ")],
@@ -575,12 +601,16 @@ function insert(text) {
     bar.append(btn);
   }
 })();
+const SHORTCUTS = {
+  b: () => wrap("**", "**", "texte en gras"),
+  i: () => wrap("*", "*", "texte en italique"),
+  k: () => wrap("[[", "]]", "Note"),
+  s: () => save(),
+};
 document.addEventListener("keydown", (ev) => {
   if (!S.editing || !(ev.ctrlKey || ev.metaKey)) return;
-  const k = ev.key.toLowerCase();
-  if (k === "b") { ev.preventDefault(); wrap("**", "**", "texte en gras"); }
-  if (k === "i") { ev.preventDefault(); wrap("*", "*", "texte en italique"); }
-  if (k === "k") { ev.preventDefault(); wrap("[[", "]]", "Note"); }
+  const fn = SHORTCUTS[ev.key.toLowerCase()];
+  if (fn) { ev.preventDefault(); fn(); }
 });
 
 function startEdit(text) {
@@ -617,16 +647,13 @@ $("btn-cancel").addEventListener("click", () => {
   showNote();
 });
 $("btn-save").addEventListener("click", () => save());
-document.addEventListener("keydown", (ev) => {
-  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s" && S.editing) { ev.preventDefault(); save(); }
-});
 window.addEventListener("beforeunload", (ev) => { if (S.editing && S.dirty) { ev.preventDefault(); ev.returnValue = ""; } });
 
 async function ensureToken() {
   if (S.token) return true;
   const res = await ask("Jeton GitHub", `
     <p>Pour enregistrer, la page a besoin d'un jeton GitHub « fine-grained » limité au dépôt
-    <b>${esc(cfg.owner)}/${esc(cfg.repo)}</b>, avec la permission <i>Contents : Read and write</i>.</p>
+    <b>${esc(cfg.owner)}/${esc(DATA_REPO)}</b>, avec la permission <i>Contents : Read and write</i>.</p>
     <label for="tok">Jeton</label><input id="tok" name="token" type="password" autocomplete="off" spellcheck="false">
     <label><input name="remember" type="checkbox"> Mémoriser sur cet appareil (chiffré avec ta phrase de passe)</label>`,
   [["cancel", "Annuler"], ["ok", "Valider", true]], { input: true });
@@ -776,10 +803,4 @@ $("btn-refresh").addEventListener("click", async () => {
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") document.body.classList.remove("side-open");
 });
-window.addEventListener("pageshow", () => { if (!S.keys) $("pass").focus(); });
-// Oublier le jeton mémorisé : Maj + clic sur « Verrouiller ».
-$("btn-lock").addEventListener("click", (ev) => {
-  if (ev.shiftKey && localStorage.getItem(TOKEN_KEY) && confirm("Oublier le jeton GitHub mémorisé sur cet appareil ?")) {
-    localStorage.removeItem(TOKEN_KEY);
-  }
-}, true);
+window.addEventListener("pageshow", () => { if (!S.keys) $("pass")?.focus(); });

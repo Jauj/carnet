@@ -1,0 +1,32 @@
+# Une fois par mois : marked et DOMPurify (copiés dans vendor/) ont-ils une nouvelle version ?
+# Si oui, ouvre une issue (une seule à la fois). La mise à jour reste manuelle : copier, noter l'empreinte, tester.
+name: Veille des bibliothèques
+on:
+  schedule:
+    - cron: "17 6 3 * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comparer avec npm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          outdated=""
+          for pkg in marked dompurify; do
+            have=$(grep -oiP "^${pkg} \K[0-9.]+" vendor/VERSIONS.txt)
+            latest=$(curl -fsS "https://registry.npmjs.org/${pkg}/latest" | jq -r .version)
+            echo "${pkg} : ${have} (dernière : ${latest})"
+            if [ "${have}" != "${latest}" ]; then outdated="${outdated}- ${pkg} : ${have} → ${latest}"$'\n'; fi
+          done
+          [ -z "${outdated}" ] && exit 0
+          title="Bibliothèques à mettre à jour dans vendor/"
+          if gh issue list --state open --search "in:title \"${title}\"" --json number --jq 'length' | grep -qx 0; then
+            gh issue create --title "${title}" --body "${outdated}
+          Vérifier les notes de version (surtout les correctifs de sécurité de DOMPurify), remplacer les fichiers, mettre à jour VERSIONS.txt (version et SHA-256), puis lancer les tests."
+          fi
