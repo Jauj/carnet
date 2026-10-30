@@ -17,6 +17,8 @@ import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as C from "../crypto.js";
+import * as N from "../notes.js";
+import * as X from "../search.js";
 
 const HOME = process.env.CARNET_HOME || path.join(os.homedir(), ".carnet");
 const CONFIG_FILE = path.join(HOME, "config.json");
@@ -130,7 +132,7 @@ function assertSafeDataDir(cfg) {
   }
   if (fs.existsSync(cfg.dataDir)) {
     const names = fs.readdirSync(cfg.dataDir);
-    const ours = names.length === 0 || (names.includes(".git") && names.every((n) => [".git", "n", "vault.json", "manifest.bin"].includes(n)));
+    const ours = names.length === 0 || (names.includes(".git") && names.every((n) => [".git", "n", "x", "vault.json", "manifest.bin"].includes(n)));
     if (!ours) throw new Error(`Le dossier ${cfg.dataDir} contient autre chose qu'un clone du carnet : rien n'a été effacé.`);
   }
 }
@@ -325,6 +327,106 @@ export function brakeTriggered(plan, nLocal, nRemote, brake) {
   return del > brake.max || (del > 3 && del > brake.ratio * total);
 }
 
+// ---------- métadonnées et index de recherche ----------
+
+const DELTA_MAX_NOTES = 200;
+const DELTA_MAX_BYTES = 2_000_000;
+const noteBase = (p) => p.slice(p.lastIndexOf("/") + 1).replace(/\.md$/i, "");
+
+async function readIndexPart(cwd, keys, f) {
+  const abs = path.join(cwd, f.file);
+  if (!fs.existsSync(abs)) return null;
+  try { return JSON.parse(C.fromUtf8(await C.decryptBytes(keys.enc, fs.readFileSync(abs), f.aad))); } catch { return null; }
+}
+
+async function writeIndexPart(cwd, keys, f, obj) {
+  fs.mkdirSync(path.join(cwd, "x"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, f.file), await C.encryptBytes(keys.enc, C.utf8(JSON.stringify(obj)), f.aad));
+}
+
+// Complète le manifeste (métadonnées des notes) et tient l'index à jour dans le clone chiffré.
+// readBytes(p) donne le contenu actuel d'une note. Renvoie le nombre de fichiers modifiés.
+async function refreshDerived(cwd, keys, manifest, readBytes, { forceRebuild = false } = {}) {
+  let changed = 0;
+  const notes = manifest.notes;
+  const textOf = async (p) => C.fromUtf8(await readBytes(p));
+
+  let fresh = 0;
+  for (const [p, e] of Object.entries(notes)) {
+    if (e.meta && e.mv === N.META_VERSION) continue;
+    e.meta = N.parseNote(await textOf(p), p);
+    e.mv = N.META_VERSION;
+    fresh++;
+  }
+  if (fresh) changed++;
+
+  const headF = await X.indexFile(C.noteId, keys.name, "base/head");
+  const deltaF = await X.indexFile(C.noteId, keys.name, "delta");
+  let head = manifest.index?.v === X.INDEX_VERSION ? await readIndexPart(cwd, keys, headF) : null;
+  const inBase = new Map(head ? head.notes.map((p, i) => [p, head.shas[i]]) : []);
+  const stale = Object.keys(notes).filter((p) => inBase.get(p) !== notes[p].sha).sort();
+  const toks = async (p) => X.tokens(noteBase(p), X.tokens(await textOf(p)));
+
+  let delta = null;
+  let rebuild = forceRebuild || !head || stale.length > DELTA_MAX_NOTES;
+  if (!rebuild) {
+    const postings = {};
+    for (let i = 0; i < stale.length; i++) for (const t of await toks(stale[i])) (postings[t] ||= []).push(i);
+    delta = { v: X.INDEX_VERSION, notes: stale, shas: stale.map((p) => notes[p].sha), postings };
+    if (JSON.stringify(delta).length > DELTA_MAX_BYTES) rebuild = true;
+  }
+  if (rebuild) {
+    const paths = Object.keys(notes).sort();
+    console.log(`Construction de l'index de recherche (${paths.length} notes)…`);
+    const shards = X.emptyShards();
+    for (let i = 0; i < paths.length; i++) {
+      X.addPostings(shards, await toks(paths[i]), i);
+      if ((i + 1) % 500 === 0) console.log(`  ${i + 1}/${paths.length} notes indexées`);
+    }
+    for (let n = 0; n < X.SHARDS; n++) await writeIndexPart(cwd, keys, await X.indexFile(C.noteId, keys.name, "base/" + n), shards[n]);
+    head = { v: X.INDEX_VERSION, built: new Date().toISOString(), notes: paths, shas: paths.map((p) => notes[p].sha) };
+    await writeIndexPart(cwd, keys, headF, head);
+    delta = { v: X.INDEX_VERSION, notes: [], shas: [], postings: {} };
+    changed += X.SHARDS + 1;
+  }
+  const deltaSha = await C.sha256Hex(C.utf8(JSON.stringify(delta)));
+  if (rebuild || manifest.index?.deltaSha !== deltaSha || !fs.existsSync(path.join(cwd, deltaF.file))) {
+    await writeIndexPart(cwd, keys, deltaF, delta);
+    changed++;
+  }
+  manifest.index = { v: X.INDEX_VERSION, built: head.built, base: head.notes.length, delta: delta.notes.length, deltaSha };
+  return changed;
+}
+
+// Ce que contient le vault, pour décider de la suite (vue « Base », support des fichiers .base).
+function vaultStats(cfg, notes) {
+  let bases = 0;
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.name.startsWith(".")) continue;
+      if (e.isDirectory()) walk(path.join(dir, e.name));
+      else if (e.name.toLowerCase().endsWith(".base")) bases++;
+    }
+  };
+  try { walk(cfg.vault); } catch {}
+  const metas = Object.values(notes).map((e) => e.meta || {});
+  const keys = new Map();
+  for (const m of metas) for (const k of Object.keys(m.props || {})) keys.set(k, (keys.get(k) || 0) + 1);
+  const top = [...keys].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => `${k} (${n})`).join(", ");
+  return {
+    withProps: metas.filter((m) => m.props).length,
+    withTags: metas.filter((m) => m.tags).length,
+    dataview: metas.filter((m) => m.dataview).length,
+    bases, top,
+  };
+}
+
+function printStats(st, total) {
+  console.log(`\nContenu : ${total} notes, dont ${st.withProps} avec des propriétés et ${st.withTags} avec des tags.`);
+  if (st.top) console.log(`  propriétés les plus courantes : ${st.top}`);
+  console.log(`  fichiers .base : ${st.bases}    notes avec un bloc dataview : ${st.dataview}`);
+}
+
 // ---------- commandes ----------
 
 async function cmdInit(cfg, opts) {
@@ -379,6 +481,7 @@ async function cmdInit(cfg, opts) {
     manifest.notes[p] = { id, sha: L[p].sha, size: L[p].size, mtime: Math.round(L[p].mtimeMs) };
     if (++i % 250 === 0) console.log(`  ${i}/${paths.length} notes chiffrées`);
   }
+  await refreshDerived(cwd, keys, manifest, async (p) => fs.readFileSync(L[p].abs));
   fs.writeFileSync(path.join(cwd, "manifest.bin"), await C.encryptManifest(keys.enc, manifest));
   console.log("Envoi vers GitHub…");
   commitAndPush(cfg, `init : ${paths.length} notes`, { force: !!opts.force });
@@ -419,7 +522,14 @@ async function cmdSync(cfg, opts) {
         `${plan.deleteLocal.length} dans le vault étaient prévues. Rien n'a été modifié.\n` +
         `Si c'est bien voulu : sync --autoriser-suppressions`);
     }
-    if (opts.dryRun) { printPlan(plan, ignored, true); return; }
+    if (opts.dryRun) {
+      printPlan(plan, ignored, true);
+      printStats(vaultStats(cfg, remote.notes), Object.keys(remote.notes).length);
+      const ix = remote.index;
+      console.log(ix ? `  index de recherche : ${ix.base} notes, ${ix.delta} en attente (construit le ${ix.built.slice(0, 10)})`
+        : "  index de recherche : pas encore construit (le prochain sync s'en charge)");
+      return;
+    }
 
     const stamp = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "");
     const final = {};
@@ -508,11 +618,21 @@ async function cmdSync(cfg, opts) {
       await upload(p, fs.readFileSync(L[p].abs), L[p].abs);
     }
 
-    if (remoteChanged > 0) {
-      remote.notes = notes;
+    // Le vault local est maintenant à jour : on y lit les notes, sinon on déchiffre la copie du clone.
+    remote.notes = notes;
+    const hadIndex = !!remote.index;
+    const readBytes = async (p) => {
+      const e = notes[p];
+      if (final[p] && final[p].sha === e.sha) return fs.readFileSync(vaultPath(cfg, p));
+      return C.decryptBytes(keys.enc, fs.readFileSync(path.join(cwd, C.noteFile(e.id))), C.noteAad(e.id));
+    };
+    const derived = await refreshDerived(cwd, keys, remote, readBytes);
+    if (!hadIndex) printStats(vaultStats(cfg, notes), Object.keys(notes).length);
+
+    if (remoteChanged + derived > 0) {
       fs.writeFileSync(path.join(cwd, "manifest.bin"), await C.encryptManifest(keys.enc, remote));
       const n = plan.upload.length + plan.deleteRemote.length + plan.conflict.length + conflicts.length;
-      const pushed = commitAndPush(cfg, `sync : ${n} note${n > 1 ? "s" : ""}`);
+      const pushed = commitAndPush(cfg, n ? `sync : ${n} note${n > 1 ? "s" : ""}` : "sync : index");
       if (pushed === "race") { console.log("Le carnet a changé pendant l'opération, nouvelle tentative…"); continue; }
     }
 

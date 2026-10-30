@@ -7,6 +7,7 @@ import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as C from "../crypto.js";
+import * as X from "../search.js";
 
 const TOOL = fileURLToPath(new URL("../tools/sync.mjs", import.meta.url));
 const PASS = "phrase de passe de test suffisamment longue";
@@ -71,12 +72,13 @@ test("init puis premier sync d'un 2e appareil ; exclusions ; rien en clair côt�
   assert.equal(read(B.vault, "02 Notes/Bureau.md").toString(), "# Compte rendu du Bureau\nConfidentiel.");
 
   const tree = remoteGit(env, "ls-tree", "-r", "--name-only", "data").trim().split("\n");
-  assert.ok(tree.every((f) => /^(vault\.json|manifest\.bin|n\/[0-9a-f]{32}\.bin)$/.test(f)), tree.join(","));
+  assert.ok(tree.every((f) => /^(vault\.json|manifest\.bin|[nx]\/[0-9a-f]{32}\.bin)$/.test(f)), tree.join(","));
   const messages = remoteGit(env, "log", "--format=%s%n%an <%ae>", "data");
   assert.ok(!/Bureau|Notes|racine/.test(messages), messages);
-  for (const f of tree.filter((f) => f.startsWith("n/"))) {
-    const blob = spawnSync("git", ["--git-dir", env.remote, "cat-file", "blob", `data:${f}`]).stdout;
-    assert.ok(!blob.toString("latin1").includes("Confidentiel"));
+  assert.ok(tree.filter((f) => f.startsWith("x/")).length > 200, "index de recherche présent");
+  for (const f of tree.filter((f) => /^[nx]\//.test(f))) {
+    const blob = spawnSync("git", ["--git-dir", env.remote, "cat-file", "blob", `data:${f}`]).stdout.toString("latin1");
+    assert.ok(!/confidentiel|bureau/i.test(blob), f);
   }
 });
 
@@ -300,4 +302,80 @@ test("migrer : l'historique passe dans un dépôt de données à part, la synchr
   write(A.vault, "b.md", "b");
   assert.match(ok(A.sync()).out, /envoyées vers GitHub : 1/);
   assert.notEqual(remoteGit({ remote: target }, "rev-parse", "data"), remoteGit(env, "rev-parse", "data"));
+});
+
+// ---------- métadonnées et index de recherche ----------
+
+const blobAt = (env, f) => new Uint8Array(spawnSync("git", ["--git-dir", env.remote, "cat-file", "blob", `data:${f}`]).stdout);
+async function openRemote(env) {
+  const keys = await C.unlock(JSON.parse(remoteGit(env, "show", "data:vault.json")), PASS);
+  const manifest = await C.decryptManifest(keys.enc, blobAt(env, "manifest.bin"));
+  const part = async (label) => {
+    const f = await X.indexFile(C.noteId, keys.name, label);
+    return JSON.parse(C.fromUtf8(await C.decryptBytes(keys.enc, blobAt(env, f.file), f.aad)));
+  };
+  // Mêmes accès que la page : rien d'autre que les fichiers chiffrés du dépôt.
+  const src = {
+    notes: manifest.notes, loadHead: () => part("base/head"), loadShard: (n) => part("base/" + n), loadDelta: () => part("delta"),
+    readText: async (p) => { const e = manifest.notes[p]; return C.fromUtf8(await C.decryptBytes(keys.enc, blobAt(env, C.noteFile(e.id)), C.noteAad(e.id))); },
+  };
+  return { keys, manifest, src };
+}
+const found = async (src, q) => (await X.runSearch(q, src)).results.map((r) => r.path);
+
+test("index : construit à l'init, delta après une modification, base reconstruite au-delà du seuil", async () => {
+  const env = setup();
+  const A = device(env, "A", {
+    "Histoire/Commune.md": "---\ntags: [histoire]\n---\n# La Commune\nLa Commune de Paris, 1871. Voir [[Révolution]].",
+    "Révolution.md": "# Révolution\nÉcrits sur la révolution russe.",
+  });
+  ok(A.init());
+  let { manifest, src } = await openRemote(env);
+  assert.deepEqual(manifest.notes["Histoire/Commune.md"].meta.tags, ["histoire"]);
+  assert.deepEqual(manifest.notes["Histoire/Commune.md"].meta.links, ["Révolution"]);
+  assert.equal(manifest.index.base, 2);
+  assert.deepEqual(await found(src, "commune paris"), ["Histoire/Commune.md"]);
+
+  write(A.vault, "Révolution.md", "# Révolution\nÉcrits sur la révolution chinoise.");
+  ok(A.sync());
+  ({ manifest, src } = await openRemote(env));
+  assert.equal(manifest.index.delta, 1);
+  assert.deepEqual(await found(src, "chinoise"), ["Révolution.md"]);
+  assert.deepEqual(await found(src, "russe"), []);        // l'ancienne version n'est plus trouvée
+  assert.equal(manifest.notes["Révolution.md"].meta.heads[0][1], "Révolution");
+
+  for (let i = 0; i < 205; i++) write(A.vault, `Lot/n${i}.md`, `note numéro ${i} mot${i}`);
+  const r = ok(A.sync());
+  assert.match(r.out, /Construction de l'index/);
+  ({ manifest, src } = await openRemote(env));
+  assert.equal(manifest.index.delta, 0);
+  assert.equal(manifest.index.base, 207);
+  assert.deepEqual(await found(src, "mot42"), ["Lot/n42.md"]);
+  assert.deepEqual(await found(src, "chinoise tag:histoire"), []);
+});
+
+test("ancien carnet sans métadonnées ni index : complété à la première synchro", async () => {
+  const env = setup();
+  const A = device(env, "A", { "a.md": "#projet alpha", "b.md": "beta" });
+  ok(A.init());
+  // On remet le carnet dans l'état d'avant : manifeste sans métadonnées, pas d'index.
+  const { keys, manifest } = await openRemote(env);
+  for (const e of Object.values(manifest.notes)) { delete e.meta; delete e.mv; }
+  delete manifest.index;
+  const work = path.join(env.root, "old");
+  spawnSync("git", ["clone", "--quiet", "--branch", "data", env.remote, work]);
+  fs.rmSync(path.join(work, "x"), { recursive: true, force: true });
+  fs.writeFileSync(path.join(work, "manifest.bin"), await C.encryptManifest(keys.enc, manifest));
+  spawnSync("git", ["-C", work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "ancien"]);
+  spawnSync("git", ["-C", work, "push", "-q", "origin", "HEAD:data"]);
+
+  const r = ok(A.sync());
+  assert.match(r.out, /2 notes, dont 0 avec des propriétés et 1 avec des tags/);
+  const { manifest: m2, src } = await openRemote(env);
+  assert.deepEqual(m2.notes["a.md"].meta.tags, ["projet"]);
+  assert.deepEqual(await found(src, "alpha"), ["a.md"]);
+  assert.match(remoteGit(env, "log", "-1", "--format=%s", "data"), /sync : index/);
+  assert.match(ok(A.sync()).out, /envoyées vers GitHub : 0/);
+  assert.match(remoteGit(env, "log", "-1", "--format=%s", "data"), /sync : index/); // rien de plus à envoyer
+  assert.equal(remoteGit(env, "rev-list", "--count", "data").trim(), "3");
 });
