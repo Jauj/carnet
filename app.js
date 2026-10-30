@@ -6,8 +6,14 @@ import { Marked } from "./vendor/marked.esm.js";
 import DOMPurify from "./vendor/purify.es.mjs";
 
 const $ = (id) => document.getElementById(id);
-const DATA_REPO = cfg.dataRepo || cfg.repo;
-const REPO = `/repos/${cfg.owner}/${DATA_REPO}`;
+// Dépôt des données : cfg.dataRepo dès qu'il contient le carnet (migration faite), sinon celui de la page.
+let dataRepo = cfg.repo;
+const repoPath = () => `/repos/${cfg.owner}/${dataRepo}`;
+async function resolveDataRepo() {
+  if (!cfg.dataRepo || cfg.dataRepo === cfg.repo) return;
+  const r = await fetch(`${cfg.raw}/${cfg.owner}/${cfg.dataRepo}/${cfg.branch}/vault.json`, { cache: "no-store" });
+  dataRepo = r.ok ? cfg.dataRepo : cfg.repo;
+}
 const TOKEN_KEY = "carnet.token";
 const DRAFT_KEY = "carnet.draft";
 const ATTACH_RE = /\.(png|jpe?g|gif|svg|webp|bmp|pdf|mp3|m4a|wav|ogg|mp4|webm|docx?|xlsx?|pptx?|odt|epub|zip|canvas)$/i;
@@ -45,21 +51,25 @@ function headers(json = false) {
 }
 
 async function api(path, { method = "GET", body, ok = [] } = {}) {
-  const r = await fetch(cfg.api + REPO + path, {
+  const r = await fetch(cfg.api + repoPath() + path, {
     method, headers: headers(!!body), body: body ? JSON.stringify(body) : undefined, cache: "no-store",
   });
   if (r.ok || ok.includes(r.status)) return { status: r.status, data: r.status === 204 ? null : await r.json() };
   if (r.status === 401) throw new Error("Jeton GitHub refusé (expiré ou révoqué ?). « Oublier le jeton » puis réessayer.");
   if (r.status === 403 || r.status === 404) {
-    throw new Error(method === "GET" ? `Accès refusé par GitHub (${r.status}).`
-      : "Ce jeton n'a pas le droit d'écrire dans le dépôt (Contents : lecture et écriture).");
+    if (method === "GET") throw new Error(`Accès refusé par GitHub (${r.status}).`);
+    // Jeton sans droit d'écriture sur ce dépôt (par exemple l'ancien, après la migration) : on l'oublie,
+    // le prochain enregistrement en demandera un autre.
+    S.token = null;
+    localStorage.removeItem(TOKEN_KEY);
+    throw new Error(`Ce jeton n'a pas le droit d'écrire dans ${cfg.owner}/${dataRepo} : il est oublié. Enregistre à nouveau pour en saisir un autre.`);
   }
   throw new Error(`GitHub a répondu ${r.status}.`);
 }
 
 // SHA du dernier commit de la branche de données, ou null si l'API refuse (limite de requêtes sans jeton).
 async function latestHead() {
-  const r = await fetch(`${cfg.api}${REPO}/git/ref/heads/${cfg.branch}`, { headers: headers(), cache: "no-store" });
+  const r = await fetch(`${cfg.api}${repoPath()}/git/ref/heads/${cfg.branch}`, { headers: headers(), cache: "no-store" });
   if (r.ok) return (await r.json()).object.sha;
   if (r.status === 404) throw new Error("Carnet introuvable sur GitHub (branche « data » absente).");
   if (r.status === 401) throw new Error("Jeton GitHub refusé (expiré ou révoqué ?).");
@@ -69,7 +79,7 @@ async function latestHead() {
 // Fichier brut à un commit précis (immuable, donc toujours à jour). Quelques secondes de délai
 // sont possibles juste après un enregistrement : on réessaie.
 async function raw(ref, path) {
-  const url = `${cfg.raw}/${cfg.owner}/${DATA_REPO}/${ref}/${path}`;
+  const url = `${cfg.raw}/${cfg.owner}/${dataRepo}/${ref}/${path}`;
   for (let i = 0; ; i++) {
     const r = await fetch(url, { cache: ref === cfg.branch ? "no-store" : "default" });
     if (r.ok) return new Uint8Array(await r.arrayBuffer());
@@ -80,6 +90,7 @@ async function raw(ref, path) {
 
 // ---------- déverrouillage ----------
 async function unlockWith(pass) {
+  await resolveDataRepo();
   const head = await latestHead();
   const ref = head || cfg.branch;
   const header = JSON.parse(C.fromUtf8(await raw(ref, "vault.json")));
@@ -653,7 +664,7 @@ async function ensureToken() {
   if (S.token) return true;
   const res = await ask("Jeton GitHub", `
     <p>Pour enregistrer, la page a besoin d'un jeton GitHub « fine-grained » limité au dépôt
-    <b>${esc(cfg.owner)}/${esc(DATA_REPO)}</b>, avec la permission <i>Contents : Read and write</i>.</p>
+    <b>${esc(cfg.owner)}/${esc(dataRepo)}</b>, avec la permission <i>Contents : Read and write</i>.</p>
     <label for="tok">Jeton</label><input id="tok" name="token" type="password" autocomplete="off" spellcheck="false">
     <label><input name="remember" type="checkbox"> Mémoriser sur cet appareil (chiffré avec ta phrase de passe)</label>`,
   [["cancel", "Annuler"], ["ok", "Valider", true]], { input: true });

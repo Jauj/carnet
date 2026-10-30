@@ -53,6 +53,7 @@ Double-cliquer sur **« Synchroniser le carnet »** (Bureau), puis taper la phra
 node C:\Users\FERRIER\carnet\tools\sync.mjs status    ce que ferait la synchronisation, sans rien modifier
 node C:\Users\FERRIER\carnet\tools\sync.mjs sync      synchroniser (--memoriser : garder la clé sur ce PC)
 node C:\Users\FERRIER\carnet\tools\sync.mjs oublier   effacer la clé mémorisée
+node C:\Users\FERRIER\carnet\tools\sync.mjs migrer    déplacer les données vers Jauj/carnet-data (une seule fois)
 node C:\Users\FERRIER\carnet\tools\sync.mjs init      créer le carnet (une seule fois ; --generer propose une phrase forte)
 ```
 La configuration se trouve dans `%USERPROFILE%\.carnet\config.json`, et l'historique dans `sync.log`.
@@ -70,15 +71,19 @@ La lecture n'a pas besoin de jeton. GitHub prévient par e-mail avant l'expirati
 
 Tant que les données sont dans `Jauj/carnet`, le jeton d'écriture peut aussi modifier le code de la page, donc la piéger pour capter la phrase de passe. Avec un dépôt de données à part, un jeton volé ne peut plus qu'abîmer des données chiffrées, qui sont aussi dans l'historique et sur le PC.
 
-1. Sur github.com, créer le dépôt **public** et vide `Jauj/carnet-data`.
-2. Sur le PC, envoyer la branche chiffrée :
+La page est prête (`dataRepo: "carnet-data"` dans `config.js`). Tant que ce dépôt ne contient pas le carnet, elle continue d'utiliser `Jauj/carnet`, puis elle bascule d'elle-même. Il reste trois étapes :
+
+1. Sur github.com : **New repository** → nom `carnet-data`, **Public**, sans README.
+2. Sur le PC, dans un terminal :
    ```
-   git -C %USERPROFILE%\.carnet\data push https://github.com/Jauj/carnet-data.git data:data
+   git -C C:\Users\FERRIER\carnet pull
+   node C:\Users\FERRIER\carnet\tools\sync.mjs migrer
+   node C:\Users\FERRIER\carnet\tools\sync.mjs sync --memoriser
    ```
-3. Dans `%USERPROFILE%\.carnet\config.json`, remplacer `remote` par `https://github.com/Jauj/carnet-data.git`. Supprimer le dossier `%USERPROFILE%\.carnet\data` : il sera recloné au prochain `sync`.
-4. Dans `config.js`, mettre `dataRepo: "carnet-data"`, puis pousser sur `main`.
-5. Créer un nouveau jeton limité à `Jauj/carnet-data` et **révoquer l'ancien**. Sur chaque appareil, Maj + clic sur « Verrouiller » oublie l'ancien jeton.
-6. Quand tout fonctionne, supprimer la branche `data` de `Jauj/carnet`.
+   `migrer` envoie tout l'historique chiffré, met à jour `config.json` et repart d'un clone propre. Le relancer ne fait rien de mal.
+3. Créer un nouveau jeton limité à `Jauj/carnet-data` (voir plus haut) et **révoquer l'ancien**. À la première modification, la page refuse l'ancien jeton et demande le nouveau.
+
+L'ancienne branche `data` de `Jauj/carnet` n'est plus lue. Tu peux la supprimer quand tu veux.
 
 ## Sécurité : ce qui protège quoi
 
@@ -110,12 +115,12 @@ Chaque enregistrement est un commit de la branche `data`. On peut donc revenir �
 
 ## Tests
 
-`node --test test/*.test.mjs` lance 25 tests :
+`node --test test/*.test.mjs` lance 26 tests :
 - chiffrement ;
 - contrôles d'échec ;
 - scénarios de synchronisation à deux appareils ;
 - conflits, frein, course à l'écriture, chemins longs ;
-- clé mémorisée (DPAPI simulée hors Windows) ;
+- clé mémorisée (DPAPI simulée hors Windows), migration vers un dépôt de données ;
 - empreintes des bibliothèques de `vendor/`.
 
 Pour tester la page en local :

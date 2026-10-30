@@ -5,6 +5,7 @@
 //   node sync.mjs sync [--memoriser] [--autoriser-suppressions]
 //   node sync.mjs status                       ce que ferait sync, sans rien modifier
 //   node sync.mjs oublier                      efface la clé mémorisée par --memoriser
+//   node sync.mjs migrer [adresse]             déplace les données vers un dépôt à part (défaut : <dépôt>-data)
 //
 // Synchronisation à trois états : L (vault), R (manifeste distant), S (dernier état commun, state.json).
 // Rien n'est jamais perdu : en cas de double modification, la version web est gardée en copie « conflit » ;
@@ -524,6 +525,40 @@ async function cmdSync(cfg, opts) {
   throw new Error("Le carnet change trop vite sur GitHub : réessaie dans un instant.");
 }
 
+// Déplace la branche chiffrée vers un dépôt de données distinct (créé vide au préalable sur GitHub),
+// puis fait pointer config.json dessus. La page bascule d'elle-même dès que ce dépôt contient les données.
+async function cmdMigrate(cfg, target) {
+  if (!target && /-data(\.git)?\/?$/.test(cfg.remote)) {
+    console.log(`Déjà fait : le carnet est dans ${cfg.remote}.`);
+    return;
+  }
+  const to = target || cfg.remote.replace(/\/([^/]+?)(\.git)?\/?$/, (m, name) => `/${name}-data.git`);
+  if (!to || to === cfg.remote) throw new Error("Indique l'adresse du nouveau dépôt : migrer https://github.com/<compte>/<dépôt>.git");
+  if (!remoteBranchExists(cfg)) throw new Error("Aucun carnet sur l'ancien dépôt : rien à déplacer.");
+  refreshClone(cfg);
+  const cwd = cfg.dataDir;
+  const head = git(cfg, ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+  const there = git(cfg, ["ls-remote", "--heads", to, cfg.branch], { allowFail: true });
+  if (there.status !== 0) {
+    throw new Error(`Le dépôt ${to} est introuvable. Crée-le d'abord sur github.com (public, vide), puis relance.`);
+  }
+  const theirs = there.stdout.trim().split(/\s+/)[0];
+  if (theirs && theirs !== head) {
+    throw new Error(`Le dépôt ${to} contient déjà une branche « ${cfg.branch} » différente : rien n'a été modifié.`);
+  }
+  if (!theirs) {
+    console.log(`Envoi de l'historique chiffré vers ${to}…`);
+    git(cfg, ["push", "--quiet", to, `HEAD:refs/heads/${cfg.branch}`], { cwd });
+  }
+  const user = fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) : {};
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ ...user, remote: to }, null, 2) + "\n");
+  assertSafeDataDir(cfg);
+  fs.rmSync(cwd, { recursive: true, force: true }); // recloné depuis le nouveau dépôt au prochain sync
+  log(`migration vers ${to}`);
+  console.log(`\nCarnet déplacé vers ${to}.`);
+  console.log("La page l'utilise déjà. Reste à créer un jeton limité à ce dépôt et à révoquer l'ancien (voir README).");
+}
+
 function pick(e) { return { sha: e.sha, size: e.size, mtimeMs: e.mtimeMs }; }
 
 function printPlan(plan, ignored, dry, conflicts = plan.conflict, stamp, cfg) {
@@ -559,8 +594,8 @@ async function main() {
     console.log(had ? "Clé mémorisée effacée : la phrase de passe sera redemandée." : "Aucune clé mémorisée.");
     return;
   }
-  if (!["init", "sync", "status"].includes(cmd)) {
-    console.log("Usage : node sync.mjs init [--generer] | sync [--memoriser] [--autoriser-suppressions] | status | oublier");
+  if (!["init", "sync", "status", "migrer"].includes(cmd)) {
+    console.log("Usage : node sync.mjs init [--generer] | sync [--memoriser] [--autoriser-suppressions] | status | oublier | migrer [adresse]");
     process.exitCode = 2;
     return;
   }
@@ -568,6 +603,7 @@ async function main() {
   const release = acquireLock();
   try {
     if (cmd === "init") await cmdInit(cfg, opts);
+    else if (cmd === "migrer") await cmdMigrate(cfg, rest.find((a) => !a.startsWith("--")));
     else await cmdSync(cfg, opts);
   } finally {
     release();

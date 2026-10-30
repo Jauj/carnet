@@ -283,3 +283,21 @@ test("clé mémorisée : sync sans phrase de passe, puis oubli ; clé périmée 
   assert.match(r.out, /ne correspond plus/);
   assert.ok(!fs.existsSync(path.join(A.home, "cle.dpapi")));
 });
+
+test("migrer : l'historique passe dans un dépôt de données à part, la synchro continue dessus", () => {
+  const env = setup();
+  const A = device(env, "A", { "a.md": "a" });
+  ok(A.init());
+  const target = path.join(env.root, "remote-data.git");
+  assert.match(A.run(["migrer"]).out, /introuvable/); // dépôt pas encore créé : rien ne bouge
+  spawnSync("git", ["init", "--bare", "--quiet", target]);
+  ok(A.run(["migrer"]));                                // adresse par défaut : <dépôt>-data
+  const cfg = JSON.parse(fs.readFileSync(path.join(A.home, "config.json"), "utf8"));
+  assert.equal(cfg.remote, target);
+  assert.equal(cfg.author.email, "carnet@test");        // le reste de la configuration est gardé
+  assert.equal(remoteGit({ remote: target }, "rev-parse", "data"), remoteGit(env, "rev-parse", "data"));
+  assert.match(ok(A.run(["migrer"])).out, /Déjà fait/);   // relancer ne fait rien de mal
+  write(A.vault, "b.md", "b");
+  assert.match(ok(A.sync()).out, /envoyées vers GitHub : 1/);
+  assert.notEqual(remoteGit({ remote: target }, "rev-parse", "data"), remoteGit(env, "rev-parse", "data"));
+});

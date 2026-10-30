@@ -2,9 +2,9 @@
 export default {
   owner: "Jauj",
   repo: "carnet",
-  // Dépôt des données chiffrées. Mettre "carnet-data" une fois la migration faite (voir README) :
-  // le jeton d'écriture n'aura alors plus aucun droit sur le code de cette page.
-  dataRepo: "carnet",
+  // Dépôt des données chiffrées, à part : le jeton d'écriture n'a ainsi aucun droit sur le code de cette page.
+  // Tant qu'il ne contient pas encore le carnet (migration pas faite), la page lit et écrit dans "repo".
+  dataRepo: "carnet-data",
   branch: "data",
   api: "https://api.github.com",
   raw: "https://raw.githubusercontent.com",
