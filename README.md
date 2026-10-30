@@ -5,7 +5,8 @@ Un vault Obsidian (les notes `.md` seulement) lisible et modifiable depuis n'imp
 - **La page** : https://jauj.github.io/carnet/
 - **Les données** : branche `data` du dépôt de données (`dataRepo` dans `config.js` : ce dépôt, ou `Jauj/carnet-data` après la migration ci-dessous).
   - `vault.json` contient les paramètres de dérivation de clé.
-  - `manifest.bin` est la liste chiffrée des notes.
+  - `manifest.bin` est la liste chiffrée des notes, avec leurs métadonnées (tags, liens, titres, propriétés).
+  - Les fichiers `x/*.bin` sont l'index de recherche chiffré.
   - Les fichiers `n/*.bin` sont les notes chiffrées.
   - Rien n'y est en clair : ni le contenu, ni les titres, ni les dossiers.
 - **Le vault Obsidian du PC** reste la référence. L'outil `tools/sync.mjs` le synchronise avec la branche `data`.
@@ -14,15 +15,32 @@ Un vault Obsidian (les notes `.md` seulement) lisible et modifiable depuis n'imp
 
 ### Sur la page
 1. **Déverrouiller** avec la phrase de passe. La dérivation de la clé prend quelques secondes ; c'est voulu, car cela ralentit d'autant toute tentative de la deviner.
-2. **Lire** :
-   - on navigue dans l'arborescence ou on filtre par nom ;
-   - les liens `[[…]]` sont cliquables ;
+2. **Se déplacer** :
+   - **Ctrl+K** : aller à une note (titre ou alias, recherche approximative). Avec `>`, on obtient les commandes.
+   - Le ruban à gauche ouvre les **Fichiers** (favoris, arborescence, récentes), la **Recherche**, les **Tags** et les **Bases**.
+   - Les liens `[[…]]` sont cliquables : **Ctrl+clic** ouvre un nouvel onglet, **Maj+clic** ouvre dans l'autre panneau (**vue scindée**, Ctrl+\\).
+   - Le panneau de droite montre le **plan** de la note, ses **rétroliens** (avec la phrase qui contient le lien) et ses infos.
+   - Les onglets ouverts sont gardés, chiffrés, pour la prochaine fois.
+3. **Rechercher dans le contenu** (Ctrl+Maj+F) :
+   - `mots` (début de mot, sans tenir compte des accents ni des majuscules), `"expression exacte"`, `-exclu` ;
+   - filtres : `tag:projet`, `dossier:"02 Notes"`, `prop:statut=fait`.
+   - L'index de recherche est construit, chiffré, par la synchronisation du PC. Les notes modifiées depuis la page sont lues directement en attendant.
+4. **Lire** :
+   - les propriétés, les callouts (repliables), `==surlignage==`, les `#tags` et les notes intégrées `![[…]]` sont mis en forme ;
+   - les cases à cocher se cochent directement (enregistrement immédiat) ;
+   - **lecture à voix haute** (icône haut-parleur) : depuis l'endroit affiché, phrase par phrase et surlignée, avec la voix et la vitesse au choix ;
    - les pièces jointes (PDF, images) ne sont pas synchronisées.
-3. **Modifier ou créer** (bouton **＋**) : enregistrer avec `Ctrl+S`.
-   - Au premier enregistrement sur un appareil, la page demande un **jeton GitHub** (voir plus bas).
-   - Option « Mémoriser » : le jeton est gardé dans le navigateur, **chiffré** avec la phrase de passe.
-4. **Verrouiller** : la page se verrouille aussi seule après 30 minutes d'inactivité, ou 5 minutes en arrière-plan (téléphone rangé, autre onglet). Un brouillon non enregistré est gardé, chiffré, et proposé au déverrouillage suivant.
-   - *Maj + clic* sur « Verrouiller » oublie le jeton mémorisé sur cet appareil.
+5. **Modifier ou créer** (Ctrl+E, Ctrl+Maj+N, **note du jour** Ctrl+Maj+D) : enregistrer avec Ctrl+S.
+   - Dans l'éditeur : complétion des `[[liens]]` et `[[note#section]]`, listes continuées par Entrée, Tab pour indenter, aperçu à côté.
+   - Le brouillon est gardé, chiffré, toutes les 5 secondes, puis proposé au déverrouillage suivant en cas de fermeture.
+   - Le menu ⋯ d'une note permet de la **renommer, la déplacer ou la supprimer**. Sur le PC, une note supprimée va dans la corbeille du carnet, et les liens ne sont pas renommés.
+   - Au premier enregistrement sur un appareil, la page demande un **jeton GitHub** (voir plus bas). Option « Mémoriser » : le jeton est gardé dans le navigateur, **chiffré** avec la phrase de passe.
+6. **Base** : des tableaux de notes filtrés par dossier, tag ou propriété, avec un tri par colonne, l'export en CSV et des vues enregistrées.
+7. **Réglages** (roue dentée) : thème (clair, sombre, sépia), police, taille, largeur, note du jour, voix, délais de verrouillage, cache hors ligne.
+8. **Appli** : la page s'installe sur l'écran d'accueil ou comme application. Les notes déjà lues restent consultables hors ligne (seuls des fichiers chiffrés sont gardés).
+9. **Verrouiller** : la page se verrouille aussi seule après 30 minutes d'inactivité, ou 5 minutes en arrière-plan (sauf pendant une lecture à voix haute). *Maj + clic* sur le cadenas oublie le jeton mémorisé sur cet appareil.
+
+Tous les raccourcis : touche `?`.
 
 ### Sur le PC
 Double-cliquer sur **« Synchroniser le carnet »** (Bureau), puis taper la phrase de passe. Le bilan s'affiche : envoyées, reçues, conflits.
@@ -115,13 +133,16 @@ Chaque enregistrement est un commit de la branche `data`. On peut donc revenir �
 
 ## Tests
 
-`node --test test/*.test.mjs` lance 26 tests :
+`node --test test/*.test.mjs` lance 38 tests :
 - chiffrement ;
 - contrôles d'échec ;
 - scénarios de synchronisation à deux appareils ;
 - conflits, frein, course à l'écriture, chemins longs ;
 - clé mémorisée (DPAPI simulée hors Windows), migration vers un dépôt de données ;
-- empreintes des bibliothèques de `vendor/`.
+- empreintes des bibliothèques de `vendor/` ;
+- analyse des notes (frontmatter, tags, liens, tâches), index et requêtes de recherche, rendu des cases à cocher.
+
+`node test/e2e-ui.cjs` teste toute l'interface dans Chromium (Playwright requis) : recherche, Base, vue scindée, édition, brouillons, lecture à voix haute, hors ligne.
 
 Pour tester la page en local :
 - `node test/e2e-setup.mjs <dossier>` prépare un vault de démonstration ;

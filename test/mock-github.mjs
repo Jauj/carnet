@@ -23,7 +23,7 @@ function git(args, { input, env } = {}) {
 }
 const gitText = (args, o) => git(args, o).toString().trim();
 
-const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
+const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json" };
 
 function send(res, status, body, type = "application/json") {
   const data = typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body);
@@ -105,7 +105,7 @@ const server = http.createServer(async (req, res) => {
       try {
         if (body.base_tree) git(["read-tree", body.base_tree], { env });
         for (const e of body.tree) {
-          if (e.sha === null) git(["update-index", "--force-remove", e.path], { env });
+          if (e.sha === null) git(["update-index", "--index-info"], { env, input: `0 ${"0".repeat(40)}\t${e.path}\n` });
           else git(["update-index", "--add", "--cacheinfo", `${e.mode},${e.sha},${e.path}`], { env });
         }
         return send(res, 201, { sha: gitText(["write-tree"], { env }) });

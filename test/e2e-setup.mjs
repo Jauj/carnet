@@ -40,6 +40,33 @@ date: 2026-10-20
 Texte du compte rendu. Retour à l'[[Accueil]].
 `,
   "Sous-dossier/Note profonde.md": "# Note profonde\n\n## Section A\n\nRetour à [[Accueil#Accueil|l'accueil]].\n",
+  "Projets/Carnet.md": `---
+statut: en cours
+priorité: 2
+échéance: 2026-11-15
+tags: [projet, informatique]
+aliases: [Le carnet chiffré]
+---
+# Carnet
+
+Un vault chiffré lisible partout. #projet/carnet
+
+## Tâches
+- [x] Chiffrement
+- [ ] Recherche plein texte
+- [ ] Lecture à voix haute
+
+> [!warning]- Attention (repliable)
+> Ne jamais perdre la phrase de passe.
+
+> [!tip] Astuce
+> Ctrl+K pour aller à une note. ==Texte surligné==.
+
+Intégration : ![[Sous-dossier/Note profonde#Section A]]
+`,
+  "Projets/Lecture.md": "---\nstatut: fait\npriorité: 1\ntags: lecture\n---\n# Lecture\n\nNotes de lecture sur la Commune de Paris et la révolution russe. Voir [[Carnet]].\n",
+  "Journal/2026-10-29.md": "# 2026-10-29\n\n- Réunion avec le Bureau.\n- Idée : [[Carnet]] doit lire à voix haute.\n",
+  "Bibliothèque/Long texte.md": "# Long texte\n\n" + Array.from({ length: 40 }, (_, i) => `## Chapitre ${i + 1}\n\nLa révolution de ${1789 + i} fut un moment décisif. Les ouvriers et les paysans se soulevèrent contre l'ordre ancien. Phrase numéro ${i} du chapitre, avec des mots rares comme anticonstitutionnellement.\n`).join("\n"),
   "Rubbish/exclue.md": "ne doit pas apparaître",
   "02 Notes/02_06 Personnel/API.md": "ne doit pas apparaître",
 };

@@ -1,235 +1,75 @@
-// Carnet — application de lecture et d'écriture du vault chiffré.
-// Tout le déchiffrement se fait ici, dans le navigateur. GitHub ne reçoit que des fichiers chiffrés.
+// Carnet — interface : panneaux, onglets, notes, édition, recherche, réglages.
+// Les données (GitHub, chiffrement) sont dans store.js ; le rendu dans render.js ; les panneaux dans panels.js.
 import cfg from "./config.js";
 import * as C from "./crypto.js";
-import { Marked } from "./vendor/marked.esm.js";
-import DOMPurify from "./vendor/purify.es.mjs";
+import * as store from "./store.js";
+import { renderMarkdown, decorate, esc, toggleTask } from "./render.js";
+import * as P from "./panels.js";
+import { attachEditor, buildToolbar } from "./editor.js";
+import * as TTS from "./tts.js";
+import { parseQuery, matchRanges } from "./search.js";
 
+const { baseName, dirName, fold } = store;
 const $ = (id) => document.getElementById(id);
-// Dépôt des données : cfg.dataRepo dès qu'il contient le carnet (migration faite), sinon celui de la page.
-let dataRepo = cfg.repo;
-const repoPath = () => `/repos/${cfg.owner}/${dataRepo}`;
-async function resolveDataRepo() {
-  if (!cfg.dataRepo || cfg.dataRepo === cfg.repo) return;
-  const r = await fetch(`${cfg.raw}/${cfg.owner}/${cfg.dataRepo}/${cfg.branch}/vault.json`, { cache: "no-store" });
-  dataRepo = r.ok ? cfg.dataRepo : cfg.repo;
-}
-const TOKEN_KEY = "carnet.token";
-const DRAFT_KEY = "carnet.draft";
-const ATTACH_RE = /\.(png|jpe?g|gif|svg|webp|bmp|pdf|mp3|m4a|wav|ogg|mp4|webm|docx?|xlsx?|pptx?|odt|epub|zip|canvas)$/i;
-
-// ---------- état de la session (effacé au verrouillage) ----------
-let S = blankState();
-function blankState() {
-  return {
-    header: null, keys: null, ref: null, head: null, fallback: false,
-    manifest: null, byName: new Map(), token: null, cache: new Map(),
-    current: null, editing: false, dirty: false, history: [],
-  };
-}
-
-// ---------- utilitaires ----------
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const fold = (s) => s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
-const baseName = (p) => p.slice(p.lastIndexOf("/") + 1).replace(/\.md$/i, "");
-const dirName = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+const icon = (name) => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); const u = document.createElementNS("http://www.w3.org/2000/svg", "use"); u.setAttribute("href", "#i-" + name); s.append(u); return s; };
+const iconBtn = (name, title, cls = "") => { const b = el("button", { className: "icon " + cls, title, type: "button" }); b.setAttribute("aria-label", title); b.append(icon(name)); return b; };
 const collator = new Intl.Collator("fr", { numeric: true, sensitivity: "base" });
-
-function status(msg, kind = "") {
-  const el = $("status");
-  el.textContent = msg || "";
-  el.className = "status" + (kind ? " " + kind : "");
-}
-
-// ---------- accès à GitHub ----------
-function headers(json = false) {
-  const h = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
-  if (S.token) h.Authorization = `Bearer ${S.token}`;
-  if (json) h["Content-Type"] = "application/json";
-  return h;
-}
-
-async function api(path, { method = "GET", body, ok = [] } = {}) {
-  const r = await fetch(cfg.api + repoPath() + path, {
-    method, headers: headers(!!body), body: body ? JSON.stringify(body) : undefined, cache: "no-store",
-  });
-  if (r.ok || ok.includes(r.status)) return { status: r.status, data: r.status === 204 ? null : await r.json() };
-  if (r.status === 401) throw new Error("Jeton GitHub refusé (expiré ou révoqué ?). « Oublier le jeton » puis réessayer.");
-  if (r.status === 403 || r.status === 404) {
-    if (method === "GET") throw new Error(`Accès refusé par GitHub (${r.status}).`);
-    // Jeton sans droit d'écriture sur ce dépôt (par exemple l'ancien, après la migration) : on l'oublie,
-    // le prochain enregistrement en demandera un autre.
-    S.token = null;
-    localStorage.removeItem(TOKEN_KEY);
-    throw new Error(`Ce jeton n'a pas le droit d'écrire dans ${cfg.owner}/${dataRepo} : il est oublié. Enregistre à nouveau pour en saisir un autre.`);
-  }
-  throw new Error(`GitHub a répondu ${r.status}.`);
-}
-
-// SHA du dernier commit de la branche de données, ou null si l'API refuse (limite de requêtes sans jeton).
-async function latestHead() {
-  const r = await fetch(`${cfg.api}${repoPath()}/git/ref/heads/${cfg.branch}`, { headers: headers(), cache: "no-store" });
-  if (r.ok) return (await r.json()).object.sha;
-  if (r.status === 404) throw new Error("Carnet introuvable sur GitHub (branche « data » absente).");
-  if (r.status === 401) throw new Error("Jeton GitHub refusé (expiré ou révoqué ?).");
-  return null;
-}
-
-// Fichier brut à un commit précis (immuable, donc toujours à jour). Quelques secondes de délai
-// sont possibles juste après un enregistrement : on réessaie.
-async function raw(ref, path) {
-  const url = `${cfg.raw}/${cfg.owner}/${dataRepo}/${ref}/${path}`;
-  for (let i = 0; ; i++) {
-    const r = await fetch(url, { cache: ref === cfg.branch ? "no-store" : "default" });
-    if (r.ok) return new Uint8Array(await r.arrayBuffer());
-    if (r.status !== 404 || i >= 5) throw new Error(`Lecture impossible (${r.status}).`);
-    await sleep(800 * (i + 1));
-  }
-}
-
-// ---------- déverrouillage ----------
-async function unlockWith(pass) {
-  await resolveDataRepo();
-  const head = await latestHead();
-  const ref = head || cfg.branch;
-  const header = JSON.parse(C.fromUtf8(await raw(ref, "vault.json")));
-  const keys = await C.unlock(header, pass);
-  const manifest = await C.decryptManifest(keys.enc, await raw(ref, "manifest.bin"));
-  S = blankState();
-  Object.assign(S, { header, keys, ref, head, fallback: !head });
-  setManifest(manifest);
-  const stored = localStorage.getItem(TOKEN_KEY);
-  if (stored) {
-    try { S.token = C.fromUtf8(await C.decryptBytes(keys.local, C.fromBase64(stored), "token")); }
-    catch { localStorage.removeItem(TOKEN_KEY); }
-  }
-  // Lecture limitée sans jeton (réseau partagé) : avec le jeton mémorisé, on relit la version la plus récente.
-  if (!head && S.token) {
-    const h = await latestHead().catch(() => null);
-    if (h) {
-      setManifest(await C.decryptManifest(keys.enc, await raw(h, "manifest.bin")));
-      Object.assign(S, { ref: h, head: h, fallback: false });
-    }
-  }
-}
-
-function setManifest(m) {
-  S.manifest = m;
-  S.byName = new Map();
-  for (const p of Object.keys(m.notes)) {
-    const k = fold(baseName(p));
-    if (!S.byName.has(k)) S.byName.set(k, []);
-    S.byName.get(k).push(p);
-  }
-}
+const narrow = () => matchMedia("(max-width: 900px)").matches;
 
 // GitHub Pages ne permet pas l'en-tête frame-ancestors : la page refuse elle-même d'être affichée
 // dans le cadre d'un autre site (qui pourrait piéger la saisie de la phrase de passe).
-if (window.top === window.self) $("lock").hidden = false;
-else {
+if (window.top !== window.self) {
   document.body.textContent = "Le carnet ne s'affiche pas dans le cadre d'un autre site. Ouvre-le directement.";
   throw new Error("Affichage dans un cadre refusé.");
 }
 
-$("unlock-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const msg = $("lock-msg");
-  const pass = $("pass").value;
-  msg.className = "msg";
-  msg.textContent = "Déverrouillage… (quelques secondes)";
-  $("unlock-form").querySelector("button").disabled = true;
-  try {
-    await unlockWith(pass);
-    $("pass").value = "";
-    msg.textContent = "";
-    $("lock").hidden = true;
-    $("app").hidden = false;
-    renderSide();
-    showHome();
-    if (S.fallback) banner("GitHub limite les lectures sans jeton depuis ce réseau : les données peuvent avoir quelques minutes de retard.");
-    if (S.header.kdf.iterations < C.MIN_SAFE_ITERATIONS) banner("Attention : ce carnet utilise une dérivation de clé faible (mode test).");
-    await offerDraft();
-    touch();
-  } catch (err) {
-    msg.className = "msg error";
-    msg.textContent = err.message;
-  } finally {
-    $("unlock-form").querySelector("button").disabled = false;
-  }
-});
-
-// ---------- verrouillage (manuel ou après inactivité) ----------
-let lastActivity = Date.now();
-function touch() { lastActivity = Date.now(); }
-for (const ev of ["keydown", "pointerdown", "scroll", "touchstart"]) document.addEventListener(ev, touch, { passive: true, capture: true });
-setInterval(() => {
-  if (S.keys && Date.now() - lastActivity > cfg.lockMinutes * 60000) lock("Verrouillé après inactivité.");
-}, 20000);
-
-// Onglet en arrière-plan (téléphone rangé, autre application) : verrouillage plus rapide.
-// Le minuteur peut être suspendu par le navigateur, d'où le contrôle aussi au retour.
-const HIDDEN_LOCK_MS = (cfg.hiddenLockMinutes ?? 5) * 60000;
-let hiddenSince = 0, hiddenTimer = 0;
-document.addEventListener("visibilitychange", () => {
-  clearTimeout(hiddenTimer);
-  if (document.hidden) {
-    hiddenSince = Date.now();
-    hiddenTimer = setTimeout(() => { if (S.keys) lock("Verrouillé après un passage en arrière-plan."); }, HIDDEN_LOCK_MS);
-  } else if (S.keys && hiddenSince && Date.now() - hiddenSince >= HIDDEN_LOCK_MS) {
-    lock("Verrouillé après un passage en arrière-plan.");
-  }
-});
-
-async function lock(message = "") {
-  if (S.keys && S.editing && S.dirty) {
-    const draft = { path: S.current.path, text: $("editor").value, baseSha: S.current.sha, isNew: !!S.current.isNew };
-    const blob = await C.encryptBytes(S.keys.local, C.utf8(JSON.stringify(draft)), "draft");
-    localStorage.setItem(DRAFT_KEY, C.toBase64(blob));
-    message += " Ton brouillon est gardé (chiffré) et te sera proposé au déverrouillage.";
-  }
-  S = blankState();
-  $("editor").value = "";
-  $("view").innerHTML = "";
-  $("tree").innerHTML = "";
-  $("recents").innerHTML = "";
-  $("filter").value = "";
-  $("banner").hidden = true;
-  $("banner").textContent = "";
-  $("app").hidden = true;
-  $("lock").hidden = false;
-  $("lock-msg").className = "msg";
-  $("lock-msg").textContent = message.trim();
-  $("pass").focus();
+// ---------- préférences d'affichage (en clair : appliquées avant le déverrouillage) ----------
+const PREFS_KEY = "carnet.prefs";
+const DEFAULT_PREFS = {
+  theme: "auto", font: "sans", size: 17, width: 760, line: 1.65,
+  lockMinutes: cfg.lockMinutes ?? 30, hiddenLockMinutes: cfg.hiddenLockMinutes ?? 5,
+  voice: "", rate: 1, right: true, side: true, sideView: "files", editPreview: false,
+};
+let prefs = { ...DEFAULT_PREFS };
+try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREFS_KEY) || "{}")); } catch {}
+function savePrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {} applyPrefs(); }
+function applyPrefs() {
+  const r = document.documentElement;
+  r.dataset.theme = prefs.theme;
+  r.dataset.font = prefs.font;
+  r.style.setProperty("--read-size", prefs.size + "px");
+  r.style.setProperty("--read-width", prefs.width + "px");
+  r.style.setProperty("--read-line", String(prefs.line));
+  document.body.classList.toggle("no-side", !prefs.side);
+  document.body.classList.toggle("no-right", !prefs.right);
 }
-// Maj + clic : oublie aussi le jeton GitHub mémorisé sur cet appareil.
-$("btn-lock").addEventListener("click", (ev) => {
-  if (ev.shiftKey && localStorage.getItem(TOKEN_KEY) && confirm("Oublier le jeton GitHub mémorisé sur cet appareil ?")) {
-    localStorage.removeItem(TOKEN_KEY);
-  }
-  if (S.editing && S.dirty && !confirm("Modifications non enregistrées : elles seront gardées en brouillon chiffré. Verrouiller ?")) return;
-  lock();
-});
+applyPrefs();
 
-async function offerDraft() {
-  const stored = localStorage.getItem(DRAFT_KEY);
-  if (!stored) return;
-  let draft;
-  try { draft = JSON.parse(C.fromUtf8(await C.decryptBytes(S.keys.local, C.fromBase64(stored), "draft"))); }
-  catch { localStorage.removeItem(DRAFT_KEY); return; }
-  const choice = await ask("Brouillon non enregistré", `<p>Un brouillon de « ${esc(baseName(draft.path))} » n'a pas été enregistré.</p>`,
-    [["drop", "Le jeter"], ["open", "Le reprendre", true]]);
-  localStorage.removeItem(DRAFT_KEY);
-  if (choice !== "open") return;
-  S.current = { path: draft.path, sha: draft.baseSha, text: draft.text, isNew: draft.isNew };
-  showNote();
-  startEdit(draft.text);
-  S.dirty = true;
+// ---------- préférences privées (chiffrées avec la clé locale, après déverrouillage) ----------
+let priv = null;
+const DEFAULT_PRIV = () => ({ favorites: [], daily: { folder: "Journal", format: "AAAA-MM-JJ", template: "" }, views: [], searches: [], session: null });
+let privTimer = 0;
+function savePriv() { clearTimeout(privTimer); privTimer = setTimeout(() => store.savePrivate(priv), 400); }
+
+// ---------- état de l'interface ----------
+let panes = [];
+let activePane = null;
+let tabSeq = 0;
+const reader = new TTS.Reader((state) => updateTtsBar(state));
+let readerTab = null;
+
+function status(msg, kind = "") {
+  const s = $("status-msg");
+  s.textContent = msg || "";
+  s.className = kind;
 }
+store.events.addEventListener("status", (e) => status(e.detail));
 
-// ---------- boîte de dialogue ----------
-function ask(title, html, buttons, { input } = {}) {
+// ---------- boîtes de dialogue ----------
+function ask(title, html, buttons, { input, wide } = {}) {
   const dlg = $("dlg");
+  dlg.classList.toggle("wide", !!wide);
   $("dlg-title").textContent = title;
   $("dlg-body").innerHTML = html;
   const box = $("dlg-buttons");
@@ -237,59 +77,212 @@ function ask(title, html, buttons, { input } = {}) {
   // Ordre inversé dans le document (le bouton principal en premier, donc choisi par Entrée),
   // rétabli à l'écran par flex-direction: row-reverse.
   for (const [value, label, primary] of [...buttons].reverse()) {
-    const b = document.createElement("button");
-    b.value = value; b.textContent = label;
+    const b = el("button", { value, textContent: label });
     if (primary) b.className = "primary";
     box.append(b);
   }
   return new Promise((resolve) => {
     dlg.onclose = () => {
-      const vals = input ? Object.fromEntries([...dlg.querySelectorAll("input")].map((i) => [i.name, i.type === "checkbox" ? i.checked : i.value])) : null;
+      const vals = input ? Object.fromEntries([...dlg.querySelectorAll("input, select, textarea")].filter((i) => i.name)
+        .map((i) => [i.name, i.type === "checkbox" ? i.checked : i.value])) : null;
       resolve(input ? { choice: dlg.returnValue, ...vals } : dlg.returnValue);
     };
     dlg.returnValue = "";
     dlg.showModal();
-    (dlg.querySelector("input") || box.querySelector(".primary"))?.focus();
+    (dlg.querySelector("input:not([type=checkbox]), select") || box.querySelector(".primary"))?.focus();
   });
 }
+const confirmBox = async (title, html, okLabel = "Confirmer") => (await ask(title, html, [["cancel", "Annuler"], ["ok", okLabel, true]])) === "ok";
 
-function banner(text) {
-  const b = $("banner");
-  const line = document.createElement("div");
-  line.textContent = text;
-  b.append(line);
-  b.hidden = false;
+function onConflict(path, isNew) {
+  return ask("Modifiée ailleurs", `
+    <p>« ${esc(baseName(path))} » ${isNew ? "existe déjà" : "a été modifiée ailleurs depuis que tu l'as ouverte"}.</p>
+    <p>Le plus sûr : enregistrer ta version comme copie, puis comparer.</p>`,
+  [["cancel", "Annuler"], ["overwrite", "Écraser l'autre version"], ["copy", "Enregistrer une copie", true]]);
 }
 
-// ---------- liste des notes ----------
-function renderSide() {
-  renderRecents();
-  renderTree();
+async function ensureToken() {
+  if (store.S.token) return true;
+  const res = await ask("Jeton GitHub", `
+    <p>Pour enregistrer, la page a besoin d'un jeton GitHub « fine-grained » limité au dépôt
+    <b>${esc(store.repoName())}</b>, avec la permission <i>Contents : Read and write</i>.</p>
+    <label for="tok">Jeton</label><input id="tok" name="token" type="password" autocomplete="off" spellcheck="false">
+    <label class="check"><input name="remember" type="checkbox"> Mémoriser sur cet appareil (chiffré avec ta phrase de passe)</label>`,
+  [["cancel", "Annuler"], ["ok", "Valider", true]], { input: true });
+  if (res.choice !== "ok" || !res.token.trim()) return false;
+  try { await store.setToken(res.token.trim(), res.remember); return true; }
+  catch (err) { status(err.message, "error"); return false; }
 }
 
-function noteLink(p, label = baseName(p), sub = "") {
-  const a = document.createElement("a");
-  a.href = "#";
-  a.dataset.path = p;
-  a.textContent = label;
-  if (sub) { const s = document.createElement("span"); s.className = "path"; s.textContent = sub; a.append(s); }
-  if (S.current?.path === p) a.classList.add("active");
-  return a;
+// ---------- déverrouillage ----------
+// Appli installable et lecture hors ligne (https, ou localhost pour les tests).
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
-function renderRecents() {
-  const box = $("recents");
-  box.innerHTML = "<h3>Récents</h3>";
-  const list = Object.entries(S.manifest.notes).sort((a, b) => b[1].mtime - a[1].mtime).slice(0, 12);
-  for (const [p] of list) box.append(noteLink(p, baseName(p), dirName(p)));
+$("lock").hidden = false;
+$("unlock-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const msg = $("lock-msg");
+  const btn = $("unlock-form").querySelector("button");
+  msg.className = "msg";
+  msg.textContent = "Déverrouillage… (quelques secondes)";
+  btn.disabled = true;
+  try {
+    await store.unlock($("pass").value);
+    $("pass").value = "";
+    msg.textContent = "";
+    priv = { ...DEFAULT_PRIV(), ...(await store.loadPrivate() || {}) };
+    $("lock").hidden = true;
+    $("app").hidden = false;
+    buildUi();
+    if (store.S.offline) status("Hors ligne : seules les notes déjà lues sur cet appareil sont disponibles.", "warn");
+    else if (store.S.fallback) status("GitHub limite les lectures sans jeton depuis ce réseau : les données peuvent avoir quelques minutes de retard.", "warn");
+    if (store.S.header.kdf.iterations < C.MIN_SAFE_ITERATIONS) status("Attention : ce carnet utilise une dérivation de clé faible (mode test).", "warn");
+    await restoreSession();
+    await offerDrafts();
+    touch();
+  } catch (err) {
+    msg.className = "msg error";
+    msg.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---------- verrouillage (manuel, inactivité, arrière-plan) ----------
+let lastActivity = Date.now();
+function touch() { lastActivity = Date.now(); }
+for (const ev of ["keydown", "pointerdown", "scroll", "touchstart"]) document.addEventListener(ev, touch, { passive: true, capture: true });
+setInterval(() => {
+  if (store.S.keys && reader.state !== "playing" && Date.now() - lastActivity > prefs.lockMinutes * 60000) lock("Verrouillé après inactivité.");
+}, 20000);
+let hiddenSince = 0, hiddenTimer = 0;
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(hiddenTimer);
+  const ms = prefs.hiddenLockMinutes * 60000;
+  if (document.hidden) {
+    hiddenSince = Date.now();
+    hiddenTimer = setTimeout(() => { if (store.S.keys && reader.state !== "playing") lock("Verrouillé après un passage en arrière-plan."); }, ms);
+  } else if (store.S.keys && hiddenSince && reader.state !== "playing" && Date.now() - hiddenSince >= ms) {
+    lock("Verrouillé après un passage en arrière-plan.");
+  }
+});
+
+async function lock(message = "") {
+  reader.stop();
+  if (store.S.keys) {
+    await saveDraftsNow();
+    if (allTabs().some((t) => t.dirty)) message += " Tes brouillons sont gardés (chiffrés) et te seront proposés au déverrouillage.";
+    clearTimeout(sessTimer);
+    snapshotSession();
+    await store.savePrivate(priv);
+  }
+  clearTimeout(privTimer);
+  store.forget();
+  priv = null;
+  for (const t of allTabs()) t.completion?.destroy();
+  panes = [];
+  activePane = null;
+  $("panes").innerHTML = "";
+  $("files").innerHTML = "";
+  for (const v of document.querySelectorAll(".side-view:not([data-view=files])")) v.innerHTML = "";
+  for (const id of ["r-outline", "r-backlinks", "r-infos"]) $(id).innerHTML = "";
+  $("filter").value = "";
+  $("app").hidden = true;
+  $("lock").hidden = false;
+  $("lock-msg").className = "msg";
+  $("lock-msg").textContent = message.trim();
+  if ($("dlg").open) $("dlg").close();
+  if ($("qs").open) $("qs").close();
+  $("pass").focus();
 }
 
-function renderTree() {
+// ---------- construction de l'interface ----------
+let side = {};
+function buildUi() {
+  side.search = P.searchPanel(document.querySelector('.side-view[data-view=search]'), {
+    rememberSearch, recentSearches: () => priv.searches, searchFor,
+  });
+  side.tags = P.tagsPanel(document.querySelector('.side-view[data-view=tags]'), { searchFor });
+  renderFiles();
+  renderBaseList();
+  showSide(prefs.sideView || "files", { keep: true });
+  activePane = makePane();
+  updateSyncInfo();
+}
+
+function showSide(view, { keep = false, focus = false } = {}) {
+  const same = prefs.sideView === view && prefs.side;
+  if (narrow() && same && !keep && !focus && document.body.classList.contains("side-open")) { document.body.classList.remove("side-open"); return; }
+  if (same && !keep && !focus && !narrow()) { prefs.side = false; savePrefs(); return; }
+  prefs.sideView = view;
+  prefs.side = true;
+  savePrefs();
+  for (const v of document.querySelectorAll(".side-view")) v.hidden = v.dataset.view !== view;
+  for (const b of document.querySelectorAll(".rb[data-view]")) b.classList.toggle("on", b.dataset.view === view);
+  if (view === "tags") side.tags.render();
+  if (view === "base") renderBaseList();
+  if (narrow() && !keep) document.body.classList.add("side-open");
+  if (view === "search" && (focus || !keep)) side.search.focus();
+}
+
+function searchFor(q) { showSide("search", { focus: true }); side.search.set(q); }
+function rememberSearch(q) {
+  priv.searches = [q, ...priv.searches.filter((x) => x !== q)].slice(0, 12);
+  savePriv();
+}
+
+for (const b of document.querySelectorAll(".rb[data-view]")) b.addEventListener("click", () => showSide(b.dataset.view));
+for (const b of document.querySelectorAll(".rb[data-cmd]")) b.addEventListener("click", (ev) => runCommand(b.dataset.cmd, ev));
+$("btn-side").addEventListener("click", () => document.body.classList.toggle("side-open"));
+$("status-sync").addEventListener("click", () => runCommand("reload"));
+
+store.events.addEventListener("manifest", () => {
+  if (!priv) return;
+  renderFiles();
+  updateSyncInfo();
+  if (prefs.sideView === "tags") side.tags?.render();
+  for (const t of allTabs()) if (t.kind === "base") t.base?.refresh();
+  updateRight();
+});
+
+function updateSyncInfo() {
+  const ix = store.S.manifest?.index;
+  const n = Object.keys(store.notes()).length;
+  $("status-sync").textContent = `${n.toLocaleString("fr-FR")} notes` + (ix ? "" : " · index absent") + (store.S.offline ? " · hors ligne" : "");
+  $("status-sync").title = (ix ? `Index de recherche construit le ${new Date(ix.built).toLocaleString("fr-FR")}` : "Index de recherche pas encore construit (synchronisation du PC)") + "\nCliquer pour recharger le carnet.";
+}
+
+// ---------- fichiers : favoris, arborescence, récents ----------
+function renderFiles() {
+  const box = $("files");
+  box.innerHTML = "";
+  const q = fold($("filter").value.trim());
+  const notes = store.notes();
+  if (q) {
+    const words = q.split(/\s+/);
+    const hits = Object.keys(notes).filter((p) => { const f = fold(p); return words.every((w) => f.includes(w)); });
+    hits.sort((a, b) => collator.compare(baseName(a), baseName(b)));
+    box.append(el("h3", { textContent: `${hits.length} résultat${hits.length > 1 ? "s" : ""}` }));
+    for (const p of hits.slice(0, 300)) box.append(P.noteLink(p, { sub: dirName(p) }));
+    if (hits.length > 300) box.append(el("div", { className: "hint", textContent: "… précise le filtre pour voir la suite." }));
+    if (!hits.length) box.append(el("button", { className: "linkish", textContent: `Chercher « ${$("filter").value.trim()} » dans le contenu`, onclick: () => searchFor($("filter").value.trim()) }));
+    return;
+  }
+  const favs = priv.favorites.filter((p) => notes[p]);
+  if (favs.length) {
+    box.append(el("h3", { textContent: "Favoris" }));
+    for (const p of favs) box.append(P.noteLink(p, { cls: "fav" }));
+  }
+  const tree = el("div", { className: "tree" });
+  const h = el("h3", { textContent: `Toutes les notes (${Object.keys(notes).length})` });
+  h.append(menuButton(""));
+  box.append(h, tree);
   const root = { dirs: new Map(), notes: [] };
-  for (const p of Object.keys(S.manifest.notes)) {
-    const parts = p.split("/");
+  for (const p of Object.keys(notes)) {
     let node = root;
-    for (const d of parts.slice(0, -1)) {
+    for (const d of p.split("/").slice(0, -1)) {
       if (!node.dirs.has(d)) node.dirs.set(d, { dirs: new Map(), notes: [] });
       node = node.dirs.get(d);
     }
@@ -297,61 +290,589 @@ function renderTree() {
   }
   const build = (node, container, prefix = "") => {
     for (const [name, child] of [...node.dirs].sort((a, b) => collator.compare(a[0], b[0]))) {
-      const det = document.createElement("details");
-      const sum = document.createElement("summary");
+      const det = el("details");
       const folder = prefix ? `${prefix}/${name}` : name;
-      sum.append(Object.assign(document.createElement("span"), { textContent: name }), menuButton(folder));
-      const inner = document.createElement("div");
+      const sum = el("summary", {}, el("span", { textContent: name }), menuButton(folder));
+      const inner = el("div");
       det.append(sum, inner);
       // Contenu construit à la première ouverture : l'arborescence reste légère.
       det.addEventListener("toggle", () => { if (det.open && !inner.childElementCount) build(child, inner, folder); });
       container.append(det);
     }
-    for (const p of node.notes.sort((a, b) => collator.compare(baseName(a), baseName(b)))) container.append(noteLink(p));
+    for (const p of node.notes.sort((a, b) => collator.compare(baseName(a), baseName(b)))) container.append(P.noteLink(p));
   };
-  const tree = $("tree");
-  tree.innerHTML = "";
-  const h = document.createElement("h3");
-  h.textContent = `Toutes les notes (${Object.keys(S.manifest.notes).length})`;
-  h.append(menuButton(""));
-  tree.append(h);
   build(root, tree);
+  box.append(el("h3", { textContent: "Récentes" }));
+  const recent = Object.entries(notes).sort((a, b) => (b[1].mtime || 0) - (a[1].mtime || 0)).slice(0, 12);
+  for (const [p] of recent) box.append(P.noteLink(p, { sub: dirName(p) }));
+  markActiveLinks();
 }
+$("filter").addEventListener("input", () => renderFiles());
+$("filter").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { const a = $("files").querySelector("a[data-path]"); if (a) openPath(a.dataset.path); }
+});
 
-// ---------- menu déroulant « ⋯ » des dossiers ----------
 function menuButton(folder) {
-  const b = document.createElement("button");
-  b.className = "menu-btn";
-  b.textContent = "⋯";
-  b.title = "Actions sur ce dossier";
-  b.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); openMenu(b, folder); });
+  const b = el("button", { className: "menu-btn", textContent: "⋯", title: "Actions sur ce dossier", type: "button" });
+  b.addEventListener("click", (ev) => {
+    ev.preventDefault(); ev.stopPropagation();
+    popMenu(b, folder || "la racine", [
+      ["Nouvelle note ici", () => offerCreate("", folder, { lockFolder: true })],
+      ["Nouveau dossier ici", () => offerFolder(folder)],
+      ["Rechercher dans ce dossier", () => searchFor(`dossier:"${folder}" `)],
+      ["Tableau de ce dossier", () => openBase({ ...P.defaultView(folder || "Racine"), q: folder ? `dossier:"${folder}"` : "" })],
+    ]);
+  });
   return b;
 }
 
-function openMenu(anchor, folder) {
+function popMenu(anchor, head, items) {
   closeMenu();
-  const m = document.createElement("div");
-  m.id = "menu";
-  m.className = "menu";
-  const where = folder || "la racine";
-  const items = [
-    ["📝 Nouvelle note ici", () => offerCreate("", folder, { lockFolder: true })],
-    ["📁 Nouveau dossier ici", () => offerFolder(folder)],
-  ];
-  m.append(Object.assign(document.createElement("div"), { className: "menu-head", textContent: where }));
-  for (const [label, fn] of items) {
-    const it = document.createElement("button");
-    it.textContent = label;
+  const m = el("div", { id: "menu", className: "menu", role: "menu" });
+  if (head) m.append(el("div", { className: "menu-head", textContent: head }));
+  for (const [label, fn, opts = {}] of items) {
+    if (!label) { m.append(el("hr")); continue; }
+    const it = el("button", { textContent: label, type: "button", className: opts.danger ? "danger" : "" });
     it.addEventListener("click", () => { closeMenu(); fn(); });
     m.append(it);
   }
   document.body.append(m);
   const r = anchor.getBoundingClientRect();
-  m.style.top = `${Math.min(r.bottom + 2, innerHeight - m.offsetHeight - 8)}px`;
-  m.style.left = `${Math.min(r.left, innerWidth - m.offsetWidth - 8)}px`;
+  m.style.top = `${Math.max(8, Math.min(r.bottom + 2, innerHeight - m.offsetHeight - 8))}px`;
+  m.style.left = `${Math.max(8, Math.min(r.left, innerWidth - m.offsetWidth - 8))}px`;
   setTimeout(() => document.addEventListener("click", closeMenu, { once: true }), 0);
 }
 function closeMenu() { $("menu")?.remove(); }
+
+// ---------- panneaux et onglets ----------
+const allTabs = () => panes.flatMap((p) => p.tabs);
+const activeTab = () => activePane?.active || null;
+
+function makePane() {
+  const pane = { tabs: [], active: null };
+  pane.el = el("section", { className: "pane" });
+  pane.tabsEl = el("div", { className: "tabbar", role: "tablist" });
+  pane.bodyEl = el("div", { className: "pane-body" });
+  pane.el.append(pane.tabsEl, pane.bodyEl);
+  pane.el.addEventListener("pointerdown", () => setActivePane(pane), true);
+  pane.el.addEventListener("focusin", () => setActivePane(pane));
+  $("panes").append(pane.el);
+  panes.push(pane);
+  document.body.classList.toggle("split", panes.length > 1);
+  openHome(pane);
+  return pane;
+}
+
+function setActivePane(pane) {
+  if (activePane === pane) return;
+  activePane = pane;
+  for (const p of panes) p.el.classList.toggle("active", p === pane);
+  updateRight();
+  updateStatusNote();
+  markActiveLinks();
+}
+
+function otherPane() {
+  if (narrow()) return activePane;
+  if (panes.length < 2) { const p = makePane(); return p; }
+  return panes.find((p) => p !== activePane);
+}
+
+function newTab(pane, kind, props = {}) {
+  const tab = { id: ++tabSeq, pane, kind, back: [], fwd: [], dirty: false, editing: false, ...props };
+  tab.el = el("div", { className: "tabview" });
+  pane.bodyEl.append(tab.el);
+  // Un onglet d'accueil vide est remplacé par le nouveau.
+  const home = pane.tabs.find((t) => t.kind === "home");
+  if (home && kind !== "home") closeTab(home, { force: true, keepPane: true });
+  const i = pane.active ? pane.tabs.indexOf(pane.active) + 1 : pane.tabs.length;
+  pane.tabs.splice(i, 0, tab);
+  return tab;
+}
+
+function activateTab(tab) {
+  const pane = tab.pane;
+  pane.active = tab;
+  for (const t of pane.tabs) t.el.hidden = t !== tab;
+  setActivePane(pane);
+  renderTabbar(pane);
+  updateRight();
+  updateStatusNote();
+  markActiveLinks();
+  saveSession();
+  // Les onglets restaurés ne sont lus qu'à leur première ouverture.
+  if (tab.pendingLoad) { tab.pendingLoad = false; loadInto(tab, tab.path); }
+}
+
+function tabTitle(t) {
+  if (t.kind === "home") return "Accueil";
+  if (t.kind === "base") return t.view?.name || "Base";
+  return t.path ? baseName(t.path) : "Nouvelle note";
+}
+
+function renderTabbar(pane) {
+  const bar = pane.tabsEl;
+  bar.innerHTML = "";
+  for (const t of pane.tabs) {
+    const b = el("div", { className: "tab" + (t === pane.active ? " on" : "") + (t.dirty ? " dirty" : ""), role: "tab", title: t.path || tabTitle(t), tabIndex: 0 });
+    b.setAttribute("aria-selected", String(t === pane.active));
+    const kindIcon = t.kind === "base" ? icon("table") : t.kind === "home" ? icon("files") : null;
+    if (kindIcon) b.append(kindIcon);
+    b.append(el("span", { className: "tab-t", textContent: tabTitle(t) }));
+    const x = iconBtn("x", "Fermer l'onglet (Alt+W)", "tab-x");
+    x.addEventListener("click", (e) => { e.stopPropagation(); closeTab(t); });
+    b.append(x);
+    b.addEventListener("click", () => activateTab(t));
+    b.addEventListener("auxclick", (e) => { if (e.button === 1) { e.preventDefault(); closeTab(t); } });
+    b.addEventListener("keydown", (e) => { if (e.key === "Enter") activateTab(t); });
+    bar.append(b);
+  }
+  const plus = iconBtn("plus", "Nouvel onglet (Ctrl+K)", "tab-new");
+  plus.addEventListener("click", () => { setActivePane(pane); openQuickSwitcher({ where: "tab" }); });
+  bar.append(plus);
+  if (panes.length > 1) {
+    const x = iconBtn("x", "Fermer ce panneau", "pane-x");
+    x.addEventListener("click", () => closePane(pane));
+    bar.append(x);
+  }
+  bar.querySelector(".tab.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+async function closeTab(tab, { force = false, keepPane = false } = {}) {
+  if (!force && tab.dirty && !(await confirmBox("Modifications non enregistrées", `<p>Fermer « ${esc(tabTitle(tab))} » sans enregistrer ? Le brouillon sera supprimé.</p>`, "Fermer sans enregistrer"))) return;
+  if (readerTab === tab) reader.stop();
+  tab.completion?.destroy();
+  tab.cleanup?.();
+  const pane = tab.pane;
+  const i = pane.tabs.indexOf(tab);
+  pane.tabs.splice(i, 1);
+  tab.el.remove();
+  if (tab.dirty) saveDraftsNow();
+  if (pane.active === tab) pane.active = null;
+  if (!pane.tabs.length) {
+    if (!keepPane && panes.length > 1) return closePane(pane);
+    if (!keepPane) openHome(pane);
+  } else if (!pane.active) activateTab(pane.tabs[Math.min(i, pane.tabs.length - 1)]);
+  renderTabbar(pane);
+  saveSession();
+}
+
+function closePane(pane) {
+  if (panes.length < 2) return;
+  const other = panes.find((p) => p !== pane);
+  // Les onglets passent dans l'autre panneau (rien n'est perdu).
+  for (const t of pane.tabs.filter((t) => t.kind !== "home")) { t.pane = other; other.bodyEl.append(t.el); t.el.hidden = true; other.tabs.push(t); }
+  other.tabs = other.tabs.filter((t) => t.kind !== "home" || other.tabs.length === 1);
+  pane.el.remove();
+  panes = panes.filter((p) => p !== pane);
+  document.body.classList.toggle("split", panes.length > 1);
+  activePane = null;
+  activateTab(other.active && other.tabs.includes(other.active) ? other.active : other.tabs[other.tabs.length - 1]);
+  for (const p of panes) renderTabbar(p);
+}
+
+function toggleSplit() {
+  if (narrow()) return status("Vue scindée : écran trop étroit.");
+  if (panes.length > 1) return closePane(panes[1]);
+  const cur = activeTab();
+  const p = makePane();
+  if (cur?.kind === "note" && cur.path && store.exists(cur.path)) openPath(cur.path, { pane: p, where: "here" });
+}
+
+// ---------- accueil ----------
+function openHome(pane) {
+  const t = newTab(pane, "home");
+  const notes = store.notes();
+  const recent = Object.entries(notes).sort((a, b) => (b[1].mtime || 0) - (a[1].mtime || 0)).slice(0, 10).map(([p]) => p);
+  const favs = (priv?.favorites || []).filter((p) => notes[p]);
+  const box = el("div", { className: "home" });
+  box.innerHTML = `<h1>Carnet</h1><p class="hint">${Object.keys(notes).length.toLocaleString("fr-FR")} notes chiffrées.</p>`;
+  const acts = el("div", { className: "home-actions" });
+  for (const [label, cmd, ic, kbd] of [["Aller à une note", "switcher", "search", "Ctrl+K"], ["Rechercher", "search", "search", "Ctrl+Maj+F"],
+    ["Note du jour", "daily", "today", "Ctrl+Maj+D"], ["Nouvelle note", "new", "plus", "Ctrl+Maj+N"], ["Tableau des notes", "base", "table", ""]]) {
+    const b = el("button", { className: "home-act", type: "button" }, icon(ic), el("span", { textContent: label }), kbd ? el("kbd", { textContent: kbd }) : "");
+    b.addEventListener("click", (e) => runCommand(cmd, e));
+    acts.append(b);
+  }
+  box.append(acts);
+  const cols = el("div", { className: "home-cols" });
+  if (favs.length) cols.append(el("div", {}, el("h3", { textContent: "Favoris" }), ...favs.map((p) => P.noteLink(p, { sub: dirName(p) }))));
+  cols.append(el("div", {}, el("h3", { textContent: "Modifiées récemment" }), ...recent.map((p) => P.noteLink(p, { sub: dirName(p) }))));
+  box.append(cols);
+  t.el.append(el("div", { className: "doc-scroll" }, box));
+  activateTab(t);
+  return t;
+}
+
+// ---------- notes ----------
+function buildNoteView(tab) {
+  const head = el("header", { className: "doc-head" });
+  const nav = el("div", { className: "doc-nav" });
+  const back = iconBtn("back", "Précédente (Alt+←)"), fwd = iconBtn("fwd", "Suivante (Alt+→)");
+  back.addEventListener("click", () => goHistory(tab, -1));
+  fwd.addEventListener("click", () => goHistory(tab, 1));
+  nav.append(back, fwd);
+  const crumbs = el("div", { className: "crumbs" });
+  const actions = el("div", { className: "doc-actions" });
+  const bEdit = el("button", { type: "button", className: "b-edit", title: "Modifier (Ctrl+E)" }, icon("edit"), el("span", { textContent: "Modifier" }));
+  const bSave = el("button", { type: "button", className: "primary b-save", textContent: "Enregistrer", title: "Ctrl+S", hidden: true });
+  const bCancel = el("button", { type: "button", className: "b-cancel", textContent: "Annuler", hidden: true });
+  const bPrev = iconBtn("eye", "Aperçu à côté du texte", "b-prev");
+  bPrev.hidden = true;
+  const bTts = iconBtn("speak", "Lire à voix haute", "b-tts");
+  const bFav = iconBtn("star", "Favori", "b-fav");
+  const bMore = iconBtn("more", "Autres actions", "b-more");
+  actions.append(bEdit, bSave, bCancel, bPrev, bTts, bFav, bMore);
+  head.append(nav, crumbs, actions);
+
+  const ttsBar = el("div", { className: "tts-bar", hidden: true });
+  const tPrev = iconBtn("prev", "Phrase précédente"), tPlay = iconBtn("pause", "Pause / reprise"), tNext = iconBtn("next", "Phrase suivante"), tStop = iconBtn("stop", "Arrêter");
+  const tRate = el("select", { title: "Vitesse" });
+  for (const r of [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]) tRate.append(el("option", { value: r, textContent: `×${r}`, selected: r === prefs.rate }));
+  ttsBar.append(el("span", { className: "tts-label", textContent: "Lecture" }), tPrev, tPlay, tNext, tStop, tRate);
+  tPrev.addEventListener("click", () => reader.skip(-1));
+  tNext.addEventListener("click", () => reader.skip(1));
+  tPlay.addEventListener("click", () => reader.toggle());
+  tStop.addEventListener("click", () => reader.stop());
+  tRate.addEventListener("change", () => { prefs.rate = Number(tRate.value); savePrefs(); if (reader.state !== "stopped") startReading(tab); });
+
+  const banner = el("div", { className: "doc-banner", hidden: true });
+  const toolbar = el("div", { className: "toolbar", hidden: true, role: "toolbar" });
+  toolbar.setAttribute("aria-label", "Mise en forme");
+  const main = el("div", { className: "doc-main" });
+  const scroll = el("div", { className: "doc-scroll" });
+  const view = el("article", { className: "note" });
+  scroll.append(view);
+  const editor = el("textarea", { className: "editor", hidden: true, spellcheck: true });
+  editor.setAttribute("aria-label", "Texte de la note");
+  const pscroll = el("div", { className: "doc-scroll preview-scroll", hidden: true });
+  const preview = el("article", { className: "note preview" });
+  pscroll.append(preview);
+  main.append(scroll, editor, pscroll);
+  tab.el.append(head, ttsBar, banner, toolbar, main);
+  Object.assign(tab, { ui: { back, fwd, crumbs, bEdit, bSave, bCancel, bPrev, bTts, bFav, bMore, ttsBar, tPlay, banner, toolbar, scroll, view, editor, pscroll, preview } });
+
+  buildToolbar(toolbar, () => editor);
+  tab.completion = attachEditor(editor, { suggest: linkSuggestions });
+  let pv = 0;
+  editor.addEventListener("input", () => {
+    if (!tab.dirty) { tab.dirty = true; renderTabbar(tab.pane); updateEditButtons(tab); }
+    if (!pscroll.hidden) { clearTimeout(pv); pv = setTimeout(() => renderPreview(tab), 250); }
+  });
+  bEdit.addEventListener("click", () => startEdit(tab));
+  bSave.addEventListener("click", () => save(tab));
+  bCancel.addEventListener("click", () => cancelEdit(tab));
+  bPrev.addEventListener("click", () => { prefs.editPreview = pscroll.hidden; savePrefs(); setPreview(tab, prefs.editPreview); });
+  bTts.addEventListener("click", () => (readerTab === tab && reader.state !== "stopped" ? reader.stop() : startReading(tab)));
+  bFav.addEventListener("click", () => toggleFavorite(tab.path));
+  bMore.addEventListener("click", () => noteMenu(tab, bMore));
+  view.addEventListener("change", (e) => { if (e.target.matches("input[data-task]")) toggleTaskBox(tab, e.target); });
+}
+
+function linkSuggestions(q) {
+  const notes = store.notes();
+  const h = q.indexOf("#");
+  if (h >= 0) {
+    const p = store.resolveLink(q.slice(0, h).trim(), activeTab()?.path || "");
+    if (!p) return [];
+    const want = fold(q.slice(h + 1));
+    return (notes[p].meta?.heads || []).filter(([, t]) => fold(t).includes(want)).map(([lvl, t]) => ({ label: t, sub: "#".repeat(lvl), insert: `${q.slice(0, h)}#${t}` }));
+  }
+  return quickMatches(q, 12).map(({ path, alias }) => {
+    const name = baseName(path);
+    // Nom seul s'il est unique, sinon chemin (comme Obsidian).
+    const unique = (store.S.byName.get(fold(name)) || []).length <= 1;
+    const target = unique ? name : path.replace(/\.md$/i, "");
+    return { label: alias || name, sub: alias ? `→ ${name}` : dirName(path), insert: alias ? `${target}|${alias}` : target };
+  });
+}
+
+// Ouvre une note.
+//   where : "here" (onglet courant), "tab" (nouvel onglet), "other" (autre panneau)
+//   anchor : titre à atteindre ; highlight : requête à surligner
+async function openPath(path, { where = "here", pane, anchor, highlight, push = true } = {}) {
+  if (!store.exists(path)) return offerCreate(path);
+  let target = pane || (where === "other" ? otherPane() : activePane);
+  let tab = target.active;
+  const existing = target.tabs.find((t) => t.kind === "note" && t.path === path && !t.isNew);
+  if (where === "tab" && existing) tab = existing;
+  else if (where === "tab" || !tab || tab.kind !== "note" || tab.editing || where === "other" && tab.path !== path) {
+    if (existing && where !== "here") tab = existing;
+    else { tab = newTab(target, "note"); buildNoteView(tab); push = false; }
+  }
+  if (push && tab.path && tab.path !== path) { tab.back.push({ path: tab.path, scroll: tab.ui.scroll.scrollTop }); tab.fwd = []; }
+  activateTab(tab);
+  await loadInto(tab, path, { anchor, highlight });
+  if (narrow()) document.body.classList.remove("side-open");
+}
+
+async function loadInto(tab, path, { anchor, highlight, scroll } = {}) {
+  tab.path = path;
+  tab.isNew = false;
+  renderTabbar(tab.pane);
+  status("Ouverture…");
+  try {
+    const note = await store.readNote(path);
+    if (tab.path !== path) return;
+    tab.note = note;
+    tab.readOnly = !note.valid;
+    stopEditUi(tab);
+    renderNote(tab);
+    if (highlight) highlightIn(tab.ui.view, tab.ui.scroll, highlight);
+    else if (anchor) scrollToHeading(tab, anchor);
+    else tab.ui.scroll.scrollTop = scroll || 0;
+    if (!note.valid) status("Fichier qui n'est pas en UTF-8 : lecture seule sur la page.");
+    else if ($("status-msg").textContent === "Ouverture…") status("");
+  } catch (err) {
+    status(err.message, "error");
+  }
+  updateRight();
+  updateStatusNote();
+  saveSession();
+}
+
+function renderNote(tab) {
+  const u = tab.ui;
+  u.crumbs.innerHTML = "";
+  const parts = dirName(tab.path) ? dirName(tab.path).split("/") : [];
+  parts.forEach((d, i) => {
+    const folder = parts.slice(0, i + 1).join("/");
+    const b = el("button", { className: "crumb", textContent: d, type: "button", title: `Tableau du dossier « ${folder} »` });
+    b.addEventListener("click", () => openBase({ ...P.defaultView(folder), q: `dossier:"${folder}"` }));
+    u.crumbs.append(b, el("span", { className: "sep", textContent: "›" }));
+  });
+  u.crumbs.append(el("span", { className: "doc-title", textContent: baseName(tab.path) }));
+  u.view.innerHTML = renderMarkdown(tab.note.text);
+  decorate(u.view, tab.path);
+  if (!u.view.textContent.trim()) u.view.innerHTML = `<p class="empty">Note vide.</p>`;
+  u.bFav.classList.toggle("on", priv.favorites.includes(tab.path));
+  u.back.disabled = !tab.back.length;
+  u.fwd.disabled = !tab.fwd.length;
+  updateEditButtons(tab);
+  markActiveLinks();
+}
+
+function goHistory(tab, dir) {
+  const from = dir < 0 ? tab.back : tab.fwd, to = dir < 0 ? tab.fwd : tab.back;
+  if (!from.length || tab.editing) return;
+  const it = from.pop();
+  to.push({ path: tab.path, scroll: tab.ui.scroll.scrollTop });
+  if (store.exists(it.path)) loadInto(tab, it.path, { scroll: it.scroll });
+}
+
+function scrollToHeading(tab, anchor) {
+  const want = fold(anchor.replace(/^\^/, ""));
+  const h = [...tab.ui.view.querySelectorAll(".heading")].find((e) => fold(e.textContent) === want);
+  h?.scrollIntoView({ block: "start" });
+}
+
+// Surligne dans la note les mots d'une recherche et va à la première occurrence.
+function highlightIn(view, scroller, qText) {
+  const q = parseQuery(qText);
+  if (!q.terms.length) return;
+  const walker = document.createTreeWalker(view, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement.closest("mark, .props, script") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
+  const nodes = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+  let first = null;
+  for (const n of nodes) {
+    const ranges = matchRanges(n.data, { ...q, phrases: [] });
+    if (!ranges?.length) continue;
+    const frag = document.createDocumentFragment();
+    let at = 0;
+    for (const [a, b] of ranges) {
+      frag.append(n.data.slice(at, a));
+      const m = el("mark", { className: "hit", textContent: n.data.slice(a, b) });
+      frag.append(m);
+      first ||= m;
+      at = b;
+    }
+    frag.append(n.data.slice(at));
+    n.replaceWith(frag);
+  }
+  if (first) {
+    first.classList.add("first");
+    requestAnimationFrame(() => first.scrollIntoView({ block: "center" }));
+  }
+}
+
+// ---------- édition ----------
+function updateEditButtons(tab) {
+  const u = tab.ui;
+  if (!u) return;
+  u.bEdit.hidden = tab.editing;
+  u.bEdit.disabled = !!tab.readOnly;
+  u.bSave.hidden = !tab.editing;
+  u.bCancel.hidden = !tab.editing;
+  u.bPrev.hidden = !tab.editing || narrow();
+  u.bPrev.classList.toggle("on", !u.pscroll.hidden);
+  u.bTts.hidden = tab.editing;
+  u.bSave.disabled = tab.saving || (!tab.dirty && !tab.isNew);
+}
+
+function startEdit(tab, text = tab.note?.text ?? "") {
+  if (tab.readOnly) return;
+  if (readerTab === tab) reader.stop();
+  const u = tab.ui;
+  tab.editing = true;
+  tab.editScrollRatio = u.scroll.scrollTop / Math.max(1, u.scroll.scrollHeight);
+  u.editor.value = text;
+  u.editor.hidden = false;
+  u.toolbar.hidden = false;
+  u.scroll.hidden = true;
+  setPreview(tab, prefs.editPreview && !narrow());
+  updateEditButtons(tab);
+  u.editor.focus();
+  u.editor.setSelectionRange(0, 0);
+  u.editor.scrollTop = tab.editScrollRatio * u.editor.scrollHeight;
+}
+
+function setPreview(tab, on) {
+  const u = tab.ui;
+  u.pscroll.hidden = !on;
+  tab.el.classList.toggle("with-preview", on);
+  if (on) renderPreview(tab);
+  updateEditButtons(tab);
+}
+
+function renderPreview(tab) {
+  const u = tab.ui;
+  u.preview.innerHTML = renderMarkdown(u.editor.value);
+  decorate(u.preview, tab.path, { depth: 1 });
+}
+
+function stopEditUi(tab) {
+  const u = tab.ui;
+  tab.editing = false;
+  tab.dirty = false;
+  u.editor.hidden = true;
+  u.toolbar.hidden = true;
+  u.pscroll.hidden = true;
+  tab.el.classList.remove("with-preview");
+  u.scroll.hidden = false;
+  tab.completion?.close();
+  updateEditButtons(tab);
+  renderTabbar(tab.pane);
+}
+
+async function cancelEdit(tab) {
+  if (tab.dirty && !(await confirmBox("Abandonner les modifications ?", "<p>Le texte modifié sera perdu.</p>", "Abandonner"))) return;
+  tab.dirty = false;
+  saveDraftsNow();
+  if (tab.isNew) return closeTab(tab, { force: true });
+  stopEditUi(tab);
+  renderNote(tab);
+}
+
+async function save(tab) {
+  if (!tab.editing || tab.saving) return;
+  if (!(await ensureToken())) return;
+  const text = tab.ui.editor.value;
+  tab.saving = true;
+  updateEditButtons(tab);
+  status("Chiffrement et enregistrement…");
+  try {
+    const res = await store.commit({ put: [{ path: tab.path, text, base: tab.isNew ? undefined : tab.note?.sha }] }, onConflict);
+    if (!res) { status("Enregistrement annulé."); return; }
+    const path = res.paths[tab.path];
+    tab.path = path;
+    tab.isNew = false;
+    tab.note = await store.readNote(path);
+    tab.dirty = false;
+    saveDraftsNow();
+    stopEditUi(tab);
+    renderNote(tab);
+    tab.ui.scroll.scrollTop = (tab.editScrollRatio || 0) * tab.ui.scroll.scrollHeight;
+    updateRight();
+    status(res.copied.length ? `Enregistré comme copie : « ${baseName(path)} ».` : "Enregistré.");
+  } catch (err) {
+    status(err.message, "error");
+  } finally {
+    tab.saving = false;
+    updateEditButtons(tab);
+  }
+}
+
+// Case à cocher cliquée en lecture : la note est modifiée et enregistrée tout de suite.
+async function toggleTaskBox(tab, cb) {
+  const text = toggleTask(tab.note.text, Number(cb.dataset.task), cb.checked);
+  if (text === null || tab.saving) { cb.checked = !cb.checked; return; }
+  if (!(await ensureToken())) { cb.checked = !cb.checked; return; }
+  tab.saving = true;
+  cb.closest("li")?.classList.toggle("done", cb.checked);
+  status("Enregistrement de la case…");
+  try {
+    const res = await store.commit({ put: [{ path: tab.path, text, base: tab.note.sha }] }, onConflict, "web case");
+    if (!res) { cb.checked = !cb.checked; status("Annulé."); return; }
+    tab.note = await store.readNote(res.paths[tab.path]);
+    tab.path = res.paths[tab.path];
+    status("Case enregistrée.");
+    updateRight();
+  } catch (err) {
+    cb.checked = !cb.checked;
+    status(err.message, "error");
+  } finally { tab.saving = false; }
+}
+
+// ---------- brouillons (chiffrés, enregistrés toutes les 5 secondes) ----------
+async function saveDraftsNow() {
+  if (!store.S.keys) return;
+  const drafts = {};
+  for (const t of allTabs()) {
+    if (t.kind === "note" && t.editing && t.dirty) drafts[t.path] = { text: t.ui.editor.value, base: t.isNew ? null : t.note?.sha, isNew: !!t.isNew, at: Date.now() };
+  }
+  await store.saveDrafts(drafts);
+}
+setInterval(() => { if (store.S.keys && allTabs().some((t) => t.dirty)) saveDraftsNow(); }, 5000);
+window.addEventListener("beforeunload", (ev) => {
+  if (allTabs().some((t) => t.dirty)) { saveDraftsNow(); ev.preventDefault(); ev.returnValue = ""; }
+});
+
+async function offerDrafts() {
+  const drafts = await store.loadDrafts();
+  if (!drafts || !Object.keys(drafts).length) return;
+  const list = Object.entries(drafts);
+  const choice = await ask("Brouillons non enregistrés",
+    `<p>${list.length > 1 ? `${list.length} brouillons n'ont` : "Un brouillon n'a"} pas été enregistré${list.length > 1 ? "s" : ""} :</p><ul>${list.map(([p, d]) =>
+      `<li><b>${esc(baseName(p))}</b> <span class="hint">${esc(dirName(p))} · ${new Date(d.at).toLocaleString("fr-FR")}</span></li>`).join("")}</ul>`,
+    [["drop", "Les jeter"], ["open", "Les reprendre", true]]);
+  if (choice !== "open") { await store.saveDrafts(null); return; }
+  for (const [path, d] of list) {
+    let tab = allTabs().find((t) => t.kind === "note" && t.path === path);
+    if (!tab) { tab = newTab(activePane, "note"); buildNoteView(tab); }
+    tab.pendingLoad = false;
+    Object.assign(tab, { path, isNew: d.isNew });
+    tab.note = !d.isNew && store.exists(path) ? await store.readNote(path).catch(() => null) : null;
+    if (tab.note && d.base && tab.note.sha !== d.base) status(`« ${baseName(path)} » a changé depuis le brouillon : l'enregistrement proposera une copie.`, "warn");
+    if (tab.note) tab.note = { ...tab.note, sha: d.base || tab.note.sha };
+    activateTab(tab);
+    if (tab.note) renderNote(tab); else renderNewHeader(tab);
+    startEdit(tab, d.text);
+    tab.dirty = true;
+    renderTabbar(tab.pane);
+    updateEditButtons(tab);
+  }
+}
+
+// ---------- nouvelle note, dossier, note du jour ----------
+function cleanNewPath(folder, name) {
+  const n = name.trim().replace(/\.md$/i, "");
+  if (!n || /[\\:*?"<>|]/.test(n) || n.includes("/")) return null;
+  const f = C.normPath(folder.trim()).replace(/\/+$/, "");
+  if (f.split("/").some((seg) => seg === ".." || seg.startsWith("."))) return null;
+  return (f ? f + "/" : "") + n + ".md";
+}
+
+async function offerCreate(target, folder, { lockFolder = false } = {}) {
+  const t = target?.startsWith("/") ? target.slice(1) : target;
+  const defFolder = folder ?? (t?.includes("/") ? dirName(t) : activeTab()?.path ? dirName(activeTab().path) : "");
+  const res = await ask("Nouvelle note", `
+    <label for="nf">Dossier</label><input id="nf" name="folder" type="text" list="dl-folders" value="${esc(defFolder)}" spellcheck="false"${lockFolder ? " readonly" : ""}>
+    <datalist id="dl-folders">${[...new Set(Object.keys(store.notes()).map(dirName))].sort().slice(0, 500).map((d) => `<option value="${esc(d)}">`).join("")}</datalist>
+    <label for="nn">Nom</label><input id="nn" name="name" type="text" value="${esc(t ? baseName(t) : "")}">`,
+  [["cancel", "Annuler"], ["ok", "Créer", true]], { input: true });
+  if (res.choice !== "ok") return;
+  startNew(res.folder, res.name);
+}
 
 async function offerFolder(parent) {
   const res = await ask("Nouveau dossier", `
@@ -365,453 +886,493 @@ async function offerFolder(parent) {
   startNew((parent ? parent + "/" : "") + res.dir.trim(), res.name || "Index");
 }
 
-$("filter").addEventListener("input", () => {
-  const q = fold($("filter").value.trim());
-  const tree = $("tree");
-  if (!q) { $("recents").hidden = false; renderTree(); return; }
-  $("recents").hidden = true;
-  const words = q.split(/\s+/);
-  const hits = Object.keys(S.manifest.notes).filter((p) => { const f = fold(p); return words.every((w) => f.includes(w)); });
-  hits.sort((a, b) => collator.compare(baseName(a), baseName(b)));
-  tree.innerHTML = `<h3>${hits.length} résultat${hits.length > 1 ? "s" : ""}</h3>`;
-  for (const p of hits.slice(0, 300)) tree.append(noteLink(p, baseName(p), dirName(p)));
-  if (hits.length > 300) tree.insertAdjacentHTML("beforeend", `<div class="hint">… précise le filtre pour voir la suite.</div>`);
-});
-
-$("side").addEventListener("click", (ev) => {
-  const a = ev.target.closest("a[data-path]");
-  if (!a) return;
-  ev.preventDefault();
-  openNote(a.dataset.path);
-  document.body.classList.remove("side-open");
-});
-$("btn-side").addEventListener("click", () => document.body.classList.toggle("side-open"));
-
-// ---------- lecture ----------
-async function readNote(path) {
-  const e = S.manifest.notes[path];
-  const cached = S.cache.get(path);
-  if (cached && cached.sha === e.sha) return cached;
-  const bytes = await C.decryptBytes(S.keys.enc, await raw(S.ref, C.noteFile(e.id)), C.noteAad(e.id));
-  const note = { path, sha: e.sha, valid: C.isValidUtf8(bytes), text: C.fromUtf8(bytes) };
-  S.cache.set(path, note);
-  return note;
+function startNew(folder, name, text) {
+  const path = cleanNewPath(folder, name);
+  if (!path) return status("Nom ou dossier invalide (caractères interdits, ou dossier caché).", "error");
+  const existing = Object.keys(store.notes()).find((p) => p.toLowerCase() === path.toLowerCase());
+  if (existing) return openPath(existing, { where: "tab" });
+  const tab = newTab(activePane, "note");
+  buildNoteView(tab);
+  Object.assign(tab, { path, isNew: true, note: null });
+  activateTab(tab);
+  renderNewHeader(tab);
+  startEdit(tab, text ?? `# ${baseName(path)}\n\n`);
+  tab.ui.editor.setSelectionRange(tab.ui.editor.value.length, tab.ui.editor.value.length);
 }
 
-async function openNote(path, { push = true } = {}) {
-  if (S.editing && S.dirty && !confirm("Modifications non enregistrées. Les abandonner ?")) return;
-  if (!S.manifest.notes[path]) return offerCreate(path);
-  status("Ouverture…");
+function renderNewHeader(tab) {
+  tab.ui.crumbs.innerHTML = "";
+  if (dirName(tab.path)) tab.ui.crumbs.append(el("span", { className: "crumb", textContent: dirName(tab.path).replaceAll("/", " › ") }), el("span", { className: "sep", textContent: "›" }));
+  tab.ui.crumbs.append(el("span", { className: "doc-title", textContent: baseName(tab.path) + " (nouvelle)" }));
+  renderTabbar(tab.pane);
+}
+
+function dailyPath(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const jours = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
+  const mois = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+  const f = (priv.daily.format || "AAAA-MM-JJ")
+    .replace(/AAAA|YYYY/g, date.getFullYear()).replace(/MM/g, pad(date.getMonth() + 1)).replace(/JJ|DD/g, pad(date.getDate()))
+    .replace(/jour/g, jours[date.getDay()]).replace(/mois/g, mois[date.getMonth()]);
+  return { folder: priv.daily.folder || "", name: f };
+}
+
+function openDaily() {
+  const { folder, name } = dailyPath();
+  const path = cleanNewPath(folder, name);
+  if (!path) return status("Format de la note du jour invalide (voir Réglages).", "error");
+  const existing = Object.keys(store.notes()).find((p) => p.toLowerCase() === path.toLowerCase());
+  if (existing) return openPath(existing, { where: "tab" });
+  const tpl = priv.daily.template && store.resolveLink(priv.daily.template);
+  const make = (t) => startNew(folder, name, t);
+  if (tpl) store.readNote(tpl).then((n) => make(n.text.replace(/\{\{date\}\}/g, name).replace(/\{\{titre\}\}/g, name))).catch(() => make());
+  else make(`# ${name}\n\n`);
+}
+
+// ---------- menu d'une note : renommer, supprimer, ouvrir à côté ----------
+function noteMenu(tab, anchor) {
+  if (!tab.path) return;
+  const items = [
+    ...(narrow() ? [["Plan, rétroliens, infos", () => { document.body.classList.add("right-open"); updateRight(); }]] : [["Ouvrir dans l'autre panneau", () => openPath(tab.path, { where: "other" })]]),
+    ["Copier le lien [[…]]", () => navigator.clipboard?.writeText(`[[${baseName(tab.path)}]]`).then(() => status("Lien copié."))],
+    ["Rechercher les mentions", () => searchFor(`"${baseName(tab.path)}"`)],
+    [],
+    ["Renommer ou déplacer…", () => renameNote(tab)],
+    ["Supprimer…", () => deleteNote(tab), { danger: true }],
+  ];
+  if (tab.isNew) items.splice(0, items.length, ["Abandonner cette nouvelle note", () => cancelEdit(tab)]);
+  popMenu(anchor, baseName(tab.path), items.map((x) => (x.length ? x : [null])));
+}
+
+async function renameNote(tab) {
+  if (tab.dirty) return status("Enregistre ou annule d'abord ta modification.", "error");
+  const res = await ask("Renommer ou déplacer", `
+    <label for="rf">Dossier</label><input id="rf" name="folder" type="text" list="dl-folders2" value="${esc(dirName(tab.path))}" spellcheck="false">
+    <datalist id="dl-folders2">${[...new Set(Object.keys(store.notes()).map(dirName))].sort().slice(0, 500).map((d) => `<option value="${esc(d)}">`).join("")}</datalist>
+    <label for="rn">Nom</label><input id="rn" name="name" type="text" value="${esc(baseName(tab.path))}">
+    <p class="hint">Les liens des autres notes vers celle-ci ne sont pas modifiés (${store.backlinksOf(tab.path).length} rétrolien${store.backlinksOf(tab.path).length > 1 ? "s" : ""}). Obsidian, sur le PC, peut les mettre à jour.</p>`,
+  [["cancel", "Annuler"], ["ok", "Renommer", true]], { input: true });
+  if (res.choice !== "ok") return;
+  const path = cleanNewPath(res.folder, res.name);
+  if (!path || path === tab.path) return;
+  if (store.exists(path)) return status("Une note porte déjà ce nom.", "error");
+  if (!(await ensureToken())) return;
+  status("Déplacement…");
   try {
-    const note = await readNote(path);
-    if (push && S.current?.path !== path) history.pushState({ path }, "", location.pathname);
-    S.current = { path, sha: note.sha, text: note.text, readOnly: !note.valid };
-    stopEdit();
-    showNote();
-    status(note.valid ? "" : "Fichier qui n'est pas en UTF-8 : lecture seule sur la page.");
-  } catch (err) {
-    status(err.message, "error");
+    const r = await store.commit({ put: [{ path, text: tab.note.text, base: undefined }], del: [{ path: tab.path, base: tab.note.sha }] }, onConflict, "web déplacement");
+    if (!r) return status("Annulé.");
+    priv.favorites = priv.favorites.map((p) => (p === tab.path ? r.paths[path] : p));
+    savePriv();
+    await loadInto(tab, r.paths[path]);
+    status("Note déplacée.");
+  } catch (err) { status(err.message, "error"); }
+}
+
+async function deleteNote(tab) {
+  if (!(await confirmBox("Supprimer la note", `<p>Supprimer « ${esc(baseName(tab.path))} » ?</p>
+    <p class="hint">Sur le PC, la prochaine synchronisation la mettra dans la corbeille du carnet (<code>.carnet\\corbeille</code>), pas à la poubelle. Elle reste aussi dans l'historique.</p>`, "Supprimer"))) return;
+  if (!(await ensureToken())) return;
+  status("Suppression…");
+  try {
+    const r = await store.commit({ del: [{ path: tab.path, base: tab.note.sha }] }, onConflict, "web suppression");
+    if (!r) return status("Annulé.");
+    priv.favorites = priv.favorites.filter((p) => p !== tab.path);
+    savePriv();
+    tab.dirty = false;
+    closeTab(tab, { force: true });
+    status("Note supprimée.");
+  } catch (err) { status(err.message, "error"); }
+}
+
+function toggleFavorite(path) {
+  if (!path || !store.exists(path)) return;
+  const on = !priv.favorites.includes(path);
+  priv.favorites = on ? [...priv.favorites, path] : priv.favorites.filter((p) => p !== path);
+  savePriv();
+  for (const t of allTabs()) if (t.path === path) t.ui?.bFav.classList.toggle("on", on);
+  renderFiles();
+  status(on ? "Ajoutée aux favoris." : "Retirée des favoris.");
+}
+
+// ---------- lecture à voix haute ----------
+function startReading(tab) {
+  try {
+    if (readerTab && readerTab !== tab) readerTab.ui.ttsBar.hidden = true;
+    readerTab = tab;
+    reader.start(tab.ui.view, { scroller: tab.ui.scroll, voiceName: prefs.voice, rate: prefs.rate });
+  } catch (err) { status(err.message, "error"); }
+}
+function updateTtsBar(state) {
+  if (!readerTab?.ui) return;
+  const u = readerTab.ui;
+  u.ttsBar.hidden = state === "stopped";
+  u.bTts.classList.toggle("on", state !== "stopped");
+  u.tPlay.replaceChildren(icon(state === "playing" ? "pause" : "play"));
+}
+
+// ---------- vue Base ----------
+function renderBaseList() {
+  const box = document.querySelector('.side-view[data-view=base]');
+  if (!box || !priv) return;
+  box.innerHTML = "";
+  box.append(el("div", { className: "panel-head" }, el("p", { className: "hint", textContent: "Tableaux de notes filtrés par dossier, tag ou propriété, triables par colonne." })));
+  const add = el("button", { className: "primary", textContent: "＋ Nouveau tableau", type: "button" });
+  add.addEventListener("click", () => openBase(P.defaultView(`Tableau ${priv.views.length + 1}`)));
+  box.append(add);
+  if (priv.views.length) box.append(el("h3", { textContent: "Tableaux enregistrés" }));
+  for (const v of priv.views) {
+    const row = el("div", { className: "view-row" });
+    const a = el("button", { className: "linkish", textContent: v.name, type: "button" });
+    a.addEventListener("click", () => openBase(v));
+    const del = iconBtn("x", "Supprimer ce tableau");
+    del.addEventListener("click", async () => {
+      if (!(await confirmBox("Supprimer le tableau", `<p>Supprimer « ${esc(v.name)} » ? Les notes ne sont pas touchées.</p>`, "Supprimer"))) return;
+      priv.views = priv.views.filter((x) => x.id !== v.id); savePriv(); renderBaseList();
+    });
+    row.append(a, del);
+    box.append(row);
   }
-}
-
-// Le chemin des notes n'apparaît jamais dans l'adresse ni dans l'historique visible du navigateur.
-window.addEventListener("popstate", (ev) => {
-  if (!S.keys) return;
-  if (ev.state?.path) openNote(ev.state.path, { push: false });
-  else if (!(S.editing && S.dirty)) showHome();
-});
-
-function showHome() {
-  S.current = null;
-  stopEdit();
-  $("crumb").textContent = "";
-  $("note-title").textContent = "Carnet";
-  $("btn-edit").hidden = true;
-  $("view").innerHTML = `<p class="empty">Choisis une note à gauche, filtre par nom, ou crée-en une avec ＋.</p>`;
-  history.replaceState({}, "", location.pathname);
-}
-
-function showNote() {
-  const c = S.current;
-  $("crumb").textContent = dirName(c.path).replaceAll("/", " › ");
-  $("note-title").textContent = baseName(c.path);
-  $("btn-edit").hidden = false;
-  $("btn-edit").disabled = !!c.readOnly;
-  $("view").innerHTML = renderMarkdown(c.text);
-  decorate($("view"), c.path);
-  $("main").scrollTop = 0;
-  for (const a of document.querySelectorAll("#side a.active")) a.classList.remove("active");
-  for (const a of document.querySelectorAll(`#side a[data-path="${CSS.escape(c.path)}"]`)) a.classList.add("active");
-}
-
-// ---------- rendu Markdown (avec les spécificités d'Obsidian) ----------
-const md = new Marked({ gfm: true, breaks: false });
-md.use({
-  extensions: [{
-    name: "wikilink",
-    level: "inline",
-    start(src) { const i = src.indexOf("[["); return i < 0 ? undefined : i > 0 && src[i - 1] === "!" ? i - 1 : i; },
-    tokenizer(src) {
-      const m = /^(!?)\[\[([^[\]\n]+?)\]\]/.exec(src);
-      if (!m) return undefined;
-      const [targetPart, alias] = m[2].split("|");
-      const h = targetPart.indexOf("#");
-      return {
-        type: "wikilink", raw: m[0], embed: !!m[1],
-        target: (h >= 0 ? targetPart.slice(0, h) : targetPart).trim(),
-        anchor: h >= 0 ? targetPart.slice(h + 1).trim() : "",
-        alias: alias?.trim(),
-      };
-    },
-    renderer(t) {
-      if (ATTACH_RE.test(t.target)) return `<span class="att">📎 ${esc(t.alias || t.target)} (pièce jointe, non synchronisée)</span>`;
-      const label = t.alias || (t.target ? t.target + (t.anchor ? " › " + t.anchor : "") : t.anchor);
-      return `<a href="#" class="wl" data-target="${esc(t.target)}" data-anchor="${esc(t.anchor)}">${esc(label)}</a>`;
-    },
-  }],
-  renderer: {
-    image({ text }) { return `<span class="att">🖼 ${esc(text || "image")} (non affichée)</span>`; },
-  },
-});
-
-function renderMarkdown(text) {
-  let body = text.replace(/^﻿/, "");
-  let props = "";
-  const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(body);
-  if (fm) {
-    props = `<details class="props"><summary>Propriétés</summary><pre>${esc(fm[1])}</pre></details>`;
-    body = body.slice(fm[0].length);
-  }
-  const html = md.parse(body);
-  return props + DOMPurify.sanitize(html, { FORBID_ATTR: ["style"], FORBID_TAGS: ["style", "img"] });
-}
-
-function resolveLink(target, from) {
-  if (!target) return from;
-  const t = C.normPath(target).replace(/\.md$/i, "");
-  const cands = S.byName.get(fold(baseName(t))) || [];
-  if (t.includes("/")) {
-    const want = fold(t + ".md");
-    return cands.find((p) => fold(p) === want || fold(p).endsWith("/" + want));
-  }
-  if (cands.length <= 1) return cands[0];
-  const dir = dirName(from) + "/";
-  return cands.find((p) => p.startsWith(dir)) || [...cands].sort((a, b) => a.length - b.length)[0];
-}
-
-function decorate(root, from) {
-  for (const a of root.querySelectorAll("a.wl")) {
-    const p = resolveLink(a.dataset.target, from);
-    if (p) a.dataset.path = p; else { a.classList.add("missing"); a.title = "Note absente : cliquer pour la créer"; }
-  }
-  for (const a of root.querySelectorAll("a[href]:not(.wl)")) {
-    const href = a.getAttribute("href");
-    if (/^https?:\/\//i.test(href)) { a.target = "_blank"; a.rel = "noopener noreferrer"; continue; }
-    if (href.startsWith("#")) continue;
-    let rel;
-    try { rel = decodeURIComponent(href.split("#")[0]); } catch { rel = href; }
-    if (/\.md$/i.test(rel)) {
-      const parts = (dirName(from) ? dirName(from) + "/" + rel : rel).split("/");
-      const out = [];
-      for (const seg of parts) { if (seg === "..") out.pop(); else if (seg && seg !== ".") out.push(seg); }
-      const p = C.normPath(out.join("/"));
-      a.className = "wl";
-      a.dataset.target = p;
-      if (S.manifest.notes[p]) a.dataset.path = p; else a.classList.add("missing");
-      a.setAttribute("href", "#");
-    } else {
-      a.replaceWith(Object.assign(document.createElement("span"), { className: "att", textContent: `📎 ${a.textContent} (non synchronisé)` }));
+  const keys = P.propertyKeys();
+  if (keys.length) {
+    box.append(el("h3", { textContent: "Propriétés les plus utilisées" }));
+    for (const [k, n] of keys.slice(0, 15)) {
+      const b = el("button", { className: "tagrow", type: "button" }, el("span", { textContent: k }), el("span", { className: "count", textContent: n }));
+      b.addEventListener("click", () => openBase({ ...P.defaultView(k), q: `prop:${k}`, cols: ["file.name", k, "file.folder", "file.mtime"] }));
+      box.append(b);
     }
   }
-  for (const bq of root.querySelectorAll("blockquote")) {
-    const p = bq.firstElementChild;
-    if (!p || p.tagName !== "P") continue;
-    const m = /^\[!([\w-]+)\][+-]?[ \t]*([^\n]*)(?:\n([\s\S]*))?$/.exec(p.innerHTML);
-    if (!m) continue;
-    bq.classList.add("callout", `callout-${m[1].toLowerCase()}`);
-    const title = document.createElement("div");
-    title.className = "callout-title";
-    title.innerHTML = m[2] || esc(m[1]);
-    if (m[3]) p.innerHTML = m[3]; else p.remove();
-    bq.prepend(title);
+}
+
+function openBase(view) {
+  const existing = allTabs().find((t) => t.kind === "base" && t.view.id === view.id);
+  if (existing) return activateTab(existing);
+  const tab = newTab(activePane, "base", { view: structuredClone(view) });
+  const head = el("header", { className: "doc-head" });
+  const name = el("input", { className: "base-name", value: tab.view.name, title: "Nom du tableau" });
+  const saveBtn = el("button", { type: "button", textContent: priv.views.some((v) => v.id === view.id) ? "Enregistré" : "Enregistrer le tableau" });
+  head.append(icon("table"), name, saveBtn);
+  const body = el("div", { className: "doc-scroll base" });
+  tab.el.append(head, body);
+  const persist = () => {
+    const i = priv.views.findIndex((v) => v.id === tab.view.id);
+    if (i >= 0) { priv.views[i] = structuredClone(tab.view); savePriv(); }
+  };
+  name.addEventListener("change", () => { tab.view.name = name.value.trim() || "Tableau"; persist(); renderTabbar(tab.pane); renderBaseList(); });
+  saveBtn.addEventListener("click", () => {
+    if (!priv.views.some((v) => v.id === tab.view.id)) { priv.views.push(structuredClone(tab.view)); savePriv(); renderBaseList(); }
+    saveBtn.textContent = "Enregistré";
+  });
+  tab.base = P.baseView(body, tab.view, { saveView: persist });
+  activateTab(tab);
+}
+
+// ---------- panneau de droite ----------
+let outlineCleanup = () => {};
+function updateRight() {
+  outlineCleanup();
+  outlineCleanup = () => {};
+  const t = activeTab();
+  const o = $("r-outline"), b = $("r-backlinks"), i = $("r-infos");
+  if (!t || t.kind !== "note" || !t.path || !store.exists(t.path) || !t.note) {
+    for (const x of [o, b, i]) x.innerHTML = `<p class="hint">—</p>`;
+    $("r-bl-count").textContent = "";
+    return;
+  }
+  if (!document.body.classList.contains("no-right")) {
+    outlineCleanup = P.outline(o, t.ui.view, t.ui.scroll);
+    P.backlinks(b, t.path);
+    P.infos(i, t.path);
+  }
+  const n = store.backlinksOf(t.path).length;
+  $("r-bl-count").textContent = n ? String(n) : "";
+}
+
+function updateStatusNote() {
+  const t = activeTab();
+  const e = t?.kind === "note" && t.path ? store.notes()[t.path] : null;
+  $("status-note").textContent = e?.meta?.words != null
+    ? `${e.meta.words.toLocaleString("fr-FR")} mots · ${Math.max(1, Math.round(e.meta.words / 230))} min · modifiée le ${new Date(e.mtime).toLocaleDateString("fr-FR")}` : "";
+}
+
+function markActiveLinks() {
+  const p = activeTab()?.path;
+  for (const a of document.querySelectorAll("#side a.active, .home a.active")) a.classList.remove("active");
+  if (p) for (const a of document.querySelectorAll(`#side a[data-path="${CSS.escape(p)}"]`)) a.classList.add("active");
+}
+
+// ---------- session (onglets ouverts, chiffrés) ----------
+let sessTimer = 0;
+function snapshotSession() {
+  const keep = (t) => (t.kind === "note" && t.path && !t.isNew) || t.kind === "base";
+  priv.session = {
+    panes: panes.map((p) => ({
+      tabs: p.tabs.filter(keep).map((t) => (t.kind === "base" ? { base: t.view } : { path: t.path })),
+      active: p.tabs.filter(keep).indexOf(p.active),
+    })),
+  };
+}
+function saveSession() {
+  if (!priv) return;
+  clearTimeout(sessTimer);
+  sessTimer = setTimeout(() => { snapshotSession(); savePriv(); }, 500);
+}
+
+async function restoreSession() {
+  const s = priv.session;
+  if (!s?.panes?.length) return;
+  const specs = narrow() ? [{ tabs: s.panes.flatMap((p) => p.tabs), active: 0 }] : s.panes.slice(0, 2);
+  for (const [i, ps] of specs.entries()) {
+    const pane = i === 0 ? activePane : makePane();
+    const tabs = ps.tabs.filter((t) => t.base || store.exists(t.path)).slice(0, 15);
+    let toActivate = null;
+    for (const [k, t] of tabs.entries()) {
+      if (t.base) { setActivePane(pane); openBase(t.base); if (k === ps.active) toActivate = pane.active; continue; }
+      const tab = newTab(pane, "note", { path: t.path });
+      buildNoteView(tab);
+      tab.pendingLoad = true;
+      if (k === ps.active || !toActivate && k === tabs.length - 1) toActivate = tab;
+    }
+    renderTabbar(pane);
+    if (toActivate) {
+      activateTab(toActivate);
+    }
+  }
+  setActivePane(panes[0]);
+}
+
+// ---------- aller à (Ctrl+K) et commandes ----------
+function fuzzy(q, s) {
+  // Lettres de q dans l'ordre ; bonus pour les débuts de mot et les suites.
+  let score = 0, i = 0, prev = -2;
+  for (let k = 0; k < s.length && i < q.length; k++) {
+    if (s[k] === q[i]) {
+      score += (k === prev + 1 ? 3 : 1) + (k === 0 || /[\s/_\-.(]/.test(s[k - 1]) ? 4 : 0);
+      prev = k; i++;
+    }
+  }
+  return i === q.length ? score - s.length * 0.02 : -1;
+}
+
+function quickMatches(qRaw, limit = 30) {
+  const q = fold(qRaw.trim());
+  const notes = store.notes();
+  if (!q) {
+    const recent = [...new Set([...allTabs().filter((t) => t.path).map((t) => t.path), ...priv.favorites])].filter((p) => notes[p]);
+    const more = Object.entries(notes).sort((a, b) => (b[1].mtime || 0) - (a[1].mtime || 0)).map(([p]) => p);
+    return [...new Set([...recent, ...more])].slice(0, limit).map((path) => ({ path }));
+  }
+  const out = [];
+  for (const [p, e] of Object.entries(notes)) {
+    const name = fold(baseName(p));
+    let best = fuzzy(q, name) * 2, alias;
+    if (name.includes(q)) best += 20 + (name.startsWith(q) ? 10 : 0);
+    for (const a of e.meta?.aliases || []) { const s = fuzzy(q, fold(a)) * 2 + (fold(a).includes(q) ? 20 : 0); if (s > best) { best = s; alias = a; } }
+    const ps = fuzzy(q, fold(p));
+    if (ps > best) best = ps;
+    if (best > 0) out.push({ path: p, score: best, alias });
+  }
+  out.sort((a, b) => b.score - a.score || (notes[b.path].mtime || 0) - (notes[a.path].mtime || 0));
+  return out.slice(0, limit);
+}
+
+const COMMANDS = [
+  ["new", "Nouvelle note", "Ctrl+Maj+N"], ["daily", "Note du jour", "Ctrl+Maj+D"], ["search", "Rechercher dans le contenu", "Ctrl+Maj+F"],
+  ["base", "Nouveau tableau (Base)", ""], ["split", "Vue scindée", "Ctrl+\\"], ["edit", "Modifier / lire la note", "Ctrl+E"],
+  ["read", "Lire à voix haute", ""], ["fav", "Ajouter / retirer des favoris", ""], ["close", "Fermer l'onglet", "Alt+W"],
+  ["right", "Afficher / masquer le panneau de droite", ""], ["side", "Afficher / masquer la barre latérale", ""],
+  ["reload", "Recharger le carnet", ""], ["settings", "Réglages", ""], ["keys", "Raccourcis clavier", "?"], ["lock", "Verrouiller", ""],
+];
+
+let qsWhere = "here", qsItems = [], qsSel = 0;
+function openQuickSwitcher({ where = "here", commands = false } = {}) {
+  qsWhere = where;
+  const input = $("qs-input");
+  input.value = commands ? ">" : "";
+  $("qs").showModal();
+  input.focus();
+  drawQs();
+}
+function drawQs() {
+  const raw = $("qs-input").value;
+  const list = $("qs-list");
+  list.innerHTML = "";
+  if (raw.startsWith(">")) {
+    const q = fold(raw.slice(1).trim());
+    qsItems = COMMANDS.filter(([, label]) => !q || fuzzy(q, fold(label)) > 0).map(([cmd, label, kbd]) => ({ cmd, label, kbd }));
+  } else {
+    qsItems = quickMatches(raw, 30).map((m) => ({ path: m.path, label: m.alias || baseName(m.path), sub: m.alias ? `→ ${baseName(m.path)} · ${dirName(m.path)}` : dirName(m.path) }));
+    if (raw.trim() && !qsItems.some((i) => fold(i.label) === fold(raw.trim()))) qsItems.push({ create: raw.trim(), label: `Créer « ${raw.trim()} »`, sub: "nouvelle note" });
+    if (raw.trim()) qsItems.push({ search: raw.trim(), label: `Rechercher « ${raw.trim()} » dans le contenu`, sub: "Ctrl+Maj+F" });
+  }
+  qsSel = 0;
+  qsItems.forEach((it, i) => {
+    const d = el("div", { className: "qs-item" + (i === 0 ? " sel" : ""), role: "option" },
+      el("span", { className: "qs-l", textContent: it.label }), el("span", { className: "qs-s", textContent: it.sub || it.kbd || "" }));
+    d.addEventListener("mousedown", (e) => { e.preventDefault(); qsSel = i; chooseQs(e); });
+    list.append(d);
+  });
+}
+function chooseQs(ev) {
+  const it = qsItems[qsSel];
+  if (!it) return;
+  $("qs").close();
+  const where = ev.shiftKey ? "other" : ev.ctrlKey || ev.metaKey ? "tab" : qsWhere;
+  if (it.cmd) runCommand(it.cmd, ev);
+  else if (it.create) offerCreate(it.create);
+  else if (it.search) searchFor(it.search);
+  else openPath(it.path, { where });
+}
+$("qs-input").addEventListener("input", drawQs);
+$("qs-input").addEventListener("keydown", (e) => {
+  const items = $("qs-list").children;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    items[qsSel]?.classList.remove("sel");
+    qsSel = (qsSel + (e.key === "ArrowDown" ? 1 : -1) + qsItems.length) % Math.max(1, qsItems.length);
+    items[qsSel]?.classList.add("sel");
+    items[qsSel]?.scrollIntoView({ block: "nearest" });
+  } else if (e.key === "Enter") { e.preventDefault(); chooseQs(e); }
+});
+$("qs").addEventListener("click", (e) => { if (e.target === $("qs")) $("qs").close(); });
+
+async function runCommand(cmd, ev = {}) {
+  const t = activeTab();
+  switch (cmd) {
+    case "switcher": return openQuickSwitcher();
+    case "new": return offerCreate("");
+    case "daily": return openDaily();
+    case "search": return showSide("search", { focus: true });
+    case "base": return openBase(P.defaultView(`Tableau ${priv.views.length + 1}`));
+    case "split": return toggleSplit();
+    case "edit": if (t?.kind === "note") { if (t.editing) { if (!t.dirty) { stopEditUi(t); renderNote(t); } } else startEdit(t); } return;
+    case "read": if (t?.kind === "note" && !t.editing) startReading(t); return;
+    case "fav": return toggleFavorite(t?.path);
+    case "close": return t && closeTab(t);
+    case "right": prefs.right = !prefs.right; savePrefs(); updateRight(); if (narrow()) document.body.classList.toggle("right-open", prefs.right); return;
+    case "side": prefs.side = !prefs.side; savePrefs(); return;
+    case "settings": return openSettings();
+    case "keys": return showKeys();
+    case "lock":
+      if (ev.shiftKey && store.hasStoredToken() && await confirmBox("Oublier le jeton", "<p>Oublier le jeton GitHub mémorisé sur cet appareil ?</p>", "Oublier")) store.forgetToken();
+      return lock();
+    case "reload":
+      if (allTabs().some((x) => x.dirty)) return status("Enregistre ou annule d'abord tes modifications.", "error");
+      status("Rechargement…");
+      try {
+        await store.reload();
+        for (const x of allTabs()) if (x.kind === "note" && x.path && store.exists(x.path) && !x.editing) await loadInto(x, x.path, { scroll: x.ui.scroll.scrollTop });
+        status("Carnet à jour.");
+      } catch (err) { status(err.message, "error"); }
   }
 }
 
-$("view").addEventListener("click", (ev) => {
-  const a = ev.target.closest("a.wl");
+function showKeys() {
+  const rows = [
+    ["Ctrl+K", "Aller à une note (et commandes avec « > »)"], ["Ctrl+Maj+F", "Rechercher dans le contenu"], ["Ctrl+Maj+P", "Commandes"],
+    ["Ctrl+E", "Modifier / lire"], ["Ctrl+S", "Enregistrer"], ["Ctrl+Maj+N", "Nouvelle note"], ["Ctrl+Maj+D", "Note du jour"],
+    ["Ctrl+\\", "Vue scindée"], ["Alt+W", "Fermer l'onglet"], ["Alt+, / Alt+;", "Onglet précédent / suivant"], ["Alt+← / Alt+→", "Note précédente / suivante"],
+    ["Ctrl+clic, clic molette", "Ouvrir dans un nouvel onglet"], ["Maj+clic", "Ouvrir dans l'autre panneau"],
+    ["Dans l'éditeur", "Ctrl+B gras · Ctrl+I italique · Ctrl+L case · Ctrl+K lien · [[ complétion · Tab indenter · Entrée continue la liste"],
+  ];
+  ask("Raccourcis clavier", `<table class="keys">${rows.map(([k, v]) => `<tr><td><kbd>${esc(k)}</kbd></td><td>${esc(v)}</td></tr>`).join("")}</table>`, [["ok", "Fermer", true]], { wide: true });
+}
+
+// ---------- réglages ----------
+async function openSettings() {
+  const voices = TTS.voices();
+  const opt = (v, l, cur) => `<option value="${esc(v)}"${String(cur) === String(v) ? " selected" : ""}>${esc(l)}</option>`;
+  const res = await ask("Réglages", `
+    <div class="settings">
+      <fieldset><legend>Apparence (cet appareil)</legend>
+        <label>Thème <select name="theme">${[["auto", "Automatique"], ["light", "Clair"], ["dark", "Sombre"], ["sepia", "Sépia"]].map(([v, l]) => opt(v, l, prefs.theme)).join("")}</select></label>
+        <label>Police de lecture <select name="font">${[["sans", "Sans empattement"], ["serif", "Avec empattement"], ["mono", "Machine à écrire"]].map(([v, l]) => opt(v, l, prefs.font)).join("")}</select></label>
+        <label>Taille du texte <input name="size" type="number" min="12" max="28" value="${prefs.size}"> px</label>
+        <label>Largeur de lecture <select name="width">${[[620, "Étroite"], [760, "Normale"], [920, "Large"], [4000, "Pleine largeur"]].map(([v, l]) => opt(v, l, prefs.width)).join("")}</select></label>
+        <label>Interligne <select name="line">${[[1.45, "Serré"], [1.65, "Normal"], [1.9, "Aéré"]].map(([v, l]) => opt(v, l, prefs.line)).join("")}</select></label>
+      </fieldset>
+      <fieldset><legend>Note du jour</legend>
+        <label>Dossier <input name="dfolder" type="text" value="${esc(priv.daily.folder)}"></label>
+        <label>Nom <input name="dformat" type="text" value="${esc(priv.daily.format)}"></label>
+        <p class="hint">AAAA année, MM mois, JJ jour ; « jour » et « mois » en toutes lettres. Exemple : <code>AAAA-MM-JJ</code>, <code>JJ mois AAAA</code>.</p>
+        <label>Modèle (nom d'une note, facultatif) <input name="dtemplate" type="text" value="${esc(priv.daily.template || "")}" placeholder="Modèles/Journal"></label>
+        <p class="hint">Dans le modèle, <code>{{date}}</code> est remplacé par le nom de la note.</p>
+      </fieldset>
+      <fieldset><legend>Lecture à voix haute</legend>
+        ${TTS.supported() ? `<label>Voix <select name="voice">${opt("", "Voix française par défaut", prefs.voice)}${voices.map((v) => opt(v.name, `${v.name} (${v.lang})${v.localService ? "" : " · en ligne"}`, prefs.voice)).join("")}</select></label>
+        <label>Vitesse <select name="rate">${[0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2].map((r) => opt(r, "×" + r, prefs.rate)).join("")}</select></label>
+        <p class="hint">Les voix marquées « en ligne » envoient le texte au service du navigateur : préfère une voix locale pour les notes sensibles.</p>`
+        : `<p class="hint">Non disponible dans ce navigateur.</p>`}
+      </fieldset>
+      <fieldset><legend>Sécurité (cet appareil)</legend>
+        <label>Verrouiller après <input name="lockMinutes" type="number" min="1" max="600" value="${prefs.lockMinutes}"> min d'inactivité</label>
+        <label>ou après <input name="hiddenLockMinutes" type="number" min="0" max="600" value="${prefs.hiddenLockMinutes}"> min en arrière-plan</label>
+        <label class="check"><input type="checkbox" name="forgetToken"${store.hasStoredToken() ? "" : " disabled"}> Oublier le jeton GitHub mémorisé</label>
+        <label class="check"><input type="checkbox" name="clearCache"> Vider le cache hors ligne (fichiers chiffrés)</label>
+      </fieldset>
+    </div>`, [["cancel", "Annuler"], ["ok", "Appliquer", true]], { input: true, wide: true });
+  if (res.choice !== "ok") return;
+  const num = (v, d, a, b) => { const n = Number(v); return Number.isFinite(n) ? Math.min(b, Math.max(a, n)) : d; };
+  Object.assign(prefs, {
+    theme: res.theme, font: res.font, size: num(res.size, 17, 12, 28), width: Number(res.width), line: Number(res.line),
+    lockMinutes: num(res.lockMinutes, 30, 1, 600), hiddenLockMinutes: num(res.hiddenLockMinutes, 5, 0, 600),
+    voice: res.voice ?? prefs.voice, rate: Number(res.rate ?? prefs.rate),
+  });
+  savePrefs();
+  priv.daily = { folder: res.dfolder.trim(), format: res.dformat.trim() || "AAAA-MM-JJ", template: res.dtemplate.trim() };
+  savePriv();
+  if (res.forgetToken) store.forgetToken();
+  if (res.clearCache && "caches" in window) { await caches.delete("carnet-donnees"); status("Cache hors ligne vidé."); }
+  else status("Réglages appliqués.");
+}
+TTS.onVoicesChanged(() => {});
+
+// ---------- clics sur les liens, tags, raccourcis ----------
+function linkWhere(ev) { return ev.shiftKey ? "other" : ev.ctrlKey || ev.metaKey || ev.button === 1 ? "tab" : "here"; }
+function onLink(ev) {
+  const tag = ev.target.closest("a.tag[data-tag]");
+  if (tag) { ev.preventDefault(); searchFor(`tag:${tag.dataset.tag}`); return; }
+  const a = ev.target.closest("a.wl, a.nl");
   if (!a) return;
   ev.preventDefault();
   if (a.dataset.path) {
-    if (a.dataset.path === S.current?.path && a.dataset.anchor) return scrollToHeading(a.dataset.anchor);
-    openNote(a.dataset.path);
-  } else {
-    offerCreate(a.dataset.target);
-  }
-});
+    const cur = activeTab();
+    if (a.dataset.path === cur?.path && a.dataset.anchor && linkWhere(ev) === "here") return scrollToHeading(cur, a.dataset.anchor);
+    openPath(a.dataset.path, { where: linkWhere(ev), anchor: a.dataset.anchor || undefined, highlight: a.dataset.highlight || undefined });
+  } else if (a.dataset.target !== undefined) offerCreate(a.dataset.target);
+}
+document.addEventListener("click", (ev) => { if (ev.button === 0) onLink(ev); });
+// Petit écran : toucher à côté d'un tiroir ouvert le referme.
+document.addEventListener("pointerdown", (ev) => {
+  if (!narrow()) return;
+  const b = document.body.classList;
+  if (b.contains("side-open") && !ev.target.closest("#side, #ribbon, #btn-side, dialog, .menu")) b.remove("side-open");
+  if (b.contains("right-open") && !ev.target.closest("#right, dialog, .menu")) b.remove("right-open");
+}, true);
+document.addEventListener("auxclick", (ev) => { if (ev.button === 1 && ev.target.closest("a.wl[data-path], a.nl[data-path]")) onLink(ev); });
 
-function scrollToHeading(anchor) {
-  const want = fold(anchor);
-  const h = [...$("view").querySelectorAll("h1,h2,h3,h4,h5,h6")].find((e) => fold(e.textContent) === want);
-  h?.scrollIntoView();
-}
-
-// ---------- édition ----------
-// ---------- barre d'outils Markdown ----------
-const TOOLS = [
-  ["B", "Gras", () => wrap("**", "**", "texte en gras")],
-  ["I", "Italique", () => wrap("*", "*", "texte en italique")],
-  ["S", "Barré", () => wrap("~~", "~~", "texte barré")],
-  ["H1", "Titre 1", () => linePrefix("# ")],
-  ["H2", "Titre 2", () => linePrefix("## ")],
-  ["H3", "Titre 3", () => linePrefix("### ")],
-  ["•", "Liste à puces", () => linePrefix("- ")],
-  ["1.", "Liste numérotée", () => linePrefix("1. ")],
-  ["☐", "Case à cocher", () => linePrefix("- [ ] ")],
-  ["❝", "Citation", () => linePrefix("> ")],
-  ["[[ ]]", "Lien vers une note", () => wrap("[[", "]]", "Note")],
-  ["🔗", "Lien web", () => wrap("[", "](https://)", "texte du lien")],
-  ["</>", "Code", () => wrap("`", "`", "code")],
-  ["ⓘ", "Encadré (callout)", () => linePrefix("> [!info] ")],
-  ["―", "Ligne de séparation", () => insert("\n---\n")],
-  ["▦", "Tableau", () => insert("\n| Colonne | Colonne |\n|---|---|\n| | |\n")],
-];
-function edState() { const ed = $("editor"); return { ed, a: ed.selectionStart, b: ed.selectionEnd, v: ed.value }; }
-function commit(ed, v, selA, selB) {
-  ed.focus();
-  ed.setSelectionRange(0, ed.value.length);
-  // execCommand garde l'annulation (Ctrl+Z) ; repli si indisponible.
-  if (!document.execCommand?.("insertText", false, v)) ed.value = v;
-  ed.setSelectionRange(selA, selB);
-  S.dirty = true;
-}
-function wrap(pre, post, placeholder) {
-  const { ed, a, b, v } = edState();
-  const sel = v.slice(a, b) || placeholder;
-  commit(ed, v.slice(0, a) + pre + sel + post + v.slice(b), a + pre.length, a + pre.length + sel.length);
-}
-function linePrefix(prefix) {
-  const { ed, a, b, v } = edState();
-  const start = v.lastIndexOf("\n", a - 1) + 1;
-  const block = v.slice(start, b);
-  const lines = block.split("\n");
-  const all = lines.every((l) => l.startsWith(prefix));
-  const out = lines.map((l) => (all ? l.slice(prefix.length) : prefix + l.replace(/^(#{1,6} |- \[ \] |- |1\. |> )/, ""))).join("\n");
-  commit(ed, v.slice(0, start) + out + v.slice(b), start, start + out.length);
-}
-function insert(text) {
-  const { ed, a, b, v } = edState();
-  commit(ed, v.slice(0, a) + text + v.slice(b), a + text.length, a + text.length);
-}
-(() => {
-  const bar = $("toolbar");
-  for (const [label, title, fn] of TOOLS) {
-    const btn = document.createElement("button");
-    btn.type = "button"; btn.textContent = label; btn.title = title;
-    btn.addEventListener("mousedown", (e) => e.preventDefault());
-    btn.addEventListener("click", fn);
-    bar.append(btn);
-  }
-})();
-const SHORTCUTS = {
-  b: () => wrap("**", "**", "texte en gras"),
-  i: () => wrap("*", "*", "texte en italique"),
-  k: () => wrap("[[", "]]", "Note"),
-  s: () => save(),
-};
 document.addEventListener("keydown", (ev) => {
-  if (!S.editing || !(ev.ctrlKey || ev.metaKey)) return;
-  const fn = SHORTCUTS[ev.key.toLowerCase()];
-  if (fn) { ev.preventDefault(); fn(); }
+  if (!store.S.keys || $("dlg").open) return;
+  const k = ev.key.toLowerCase(), mod = ev.ctrlKey || ev.metaKey;
+  const t = activeTab();
+  const inField = ev.target.closest("input, textarea, select");
+  if (mod && !ev.shiftKey && k === "k") { ev.preventDefault(); if (!$("qs").open) openQuickSwitcher(); }
+  else if (mod && ev.shiftKey && k === "p") { ev.preventDefault(); openQuickSwitcher({ commands: true }); }
+  else if (mod && ev.shiftKey && k === "f") { ev.preventDefault(); showSide("search", { focus: true }); }
+  else if (mod && ev.shiftKey && k === "d") { ev.preventDefault(); openDaily(); }
+  else if (mod && ev.shiftKey && k === "n") { ev.preventDefault(); offerCreate(""); }
+  else if (mod && k === "s") { ev.preventDefault(); if (t?.editing) save(t); }
+  else if (mod && k === "e") { ev.preventDefault(); runCommand("edit"); }
+  else if (mod && k === "\\") { ev.preventDefault(); toggleSplit(); }
+  else if (ev.altKey && k === "w") { ev.preventDefault(); if (t) closeTab(t); }
+  else if (ev.altKey && (ev.key === "," || ev.key === ";")) {
+    ev.preventDefault();
+    const tabs = activePane.tabs, i = tabs.indexOf(t);
+    if (tabs.length > 1) activateTab(tabs[(i + (ev.key === ";" ? 1 : -1) + tabs.length) % tabs.length]);
+  }
+  else if (ev.altKey && (ev.key === "ArrowLeft" || ev.key === "ArrowRight") && !inField) { ev.preventDefault(); if (t?.kind === "note") goHistory(t, ev.key === "ArrowLeft" ? -1 : 1); }
+  else if (ev.key === "?" && !inField) showKeys();
+  else if (ev.key === "Escape") { document.body.classList.remove("side-open", "right-open"); closeMenu(); }
 });
 
-function startEdit(text) {
-  S.editing = true;
-  S.dirty = false;
-  const ed = $("editor");
-  ed.value = text;
-  ed.hidden = false;
-  $("toolbar").hidden = false;
-  $("view").hidden = true;
-  $("btn-edit").hidden = true;
-  $("btn-save").hidden = false;
-  $("btn-cancel").hidden = false;
-  ed.focus();
-}
-
-function stopEdit() {
-  S.editing = false;
-  S.dirty = false;
-  $("editor").hidden = true;
-  $("toolbar").hidden = true;
-  $("view").hidden = false;
-  $("btn-save").hidden = true;
-  $("btn-cancel").hidden = true;
-  $("btn-edit").hidden = !S.current;
-}
-
-$("btn-edit").addEventListener("click", () => { if (S.current && !S.current.readOnly) startEdit(S.current.text); });
-$("editor").addEventListener("input", () => { S.dirty = true; });
-$("btn-cancel").addEventListener("click", () => {
-  if (S.dirty && !confirm("Abandonner les modifications ?")) return;
-  if (S.current?.isNew) return showHome();
-  stopEdit();
-  showNote();
-});
-$("btn-save").addEventListener("click", () => save());
-window.addEventListener("beforeunload", (ev) => { if (S.editing && S.dirty) { ev.preventDefault(); ev.returnValue = ""; } });
-
-async function ensureToken() {
-  if (S.token) return true;
-  const res = await ask("Jeton GitHub", `
-    <p>Pour enregistrer, la page a besoin d'un jeton GitHub « fine-grained » limité au dépôt
-    <b>${esc(cfg.owner)}/${esc(dataRepo)}</b>, avec la permission <i>Contents : Read and write</i>.</p>
-    <label for="tok">Jeton</label><input id="tok" name="token" type="password" autocomplete="off" spellcheck="false">
-    <label><input name="remember" type="checkbox"> Mémoriser sur cet appareil (chiffré avec ta phrase de passe)</label>`,
-  [["cancel", "Annuler"], ["ok", "Valider", true]], { input: true });
-  if (res.choice !== "ok" || !res.token.trim()) return false;
-  S.token = res.token.trim();
-  try {
-    await api("");
-  } catch (err) {
-    S.token = null;
-    status(err.message, "error");
-    return false;
-  }
-  if (res.remember) {
-    const blob = await C.encryptBytes(S.keys.local, C.utf8(S.token), "token");
-    localStorage.setItem(TOKEN_KEY, C.toBase64(blob));
-  }
-  return true;
-}
-
-async function save() {
-  if (!S.editing || !S.current) return;
-  if (!(await ensureToken())) return;
-  const text = $("editor").value;
-  const wanted = S.current.path;
-  const known = !!S.manifest.notes[wanted];
-  $("btn-save").disabled = true;
-  status("Chiffrement et enregistrement…");
-  try {
-    const res = await commitNote(wanted, C.utf8(text), S.current.sha, !!S.current.isNew);
-    if (!res) { status("Enregistrement annulé."); return; }
-    S.cache.set(res.path, { path: res.path, sha: res.sha, valid: true, text });
-    S.current = { path: res.path, sha: res.sha, text };
-    stopEdit();
-    renderRecents();
-    if (!known || res.copied) renderTree();   // l'arborescence ne change que si une note apparaît
-    showNote();
-    status(res.copied ? `Enregistré comme copie : « ${baseName(res.path)} ».` : "Enregistré.");
-  } catch (err) {
-    status(err.message, "error");
-  } finally {
-    $("btn-save").disabled = false;
-  }
-}
-
-// Un enregistrement = un commit (note + manifeste), accepté seulement s'il prolonge la branche.
-async function commitNote(path, bytes, baseSha, isNew) {
-  let target = path;
-  let expected = isNew ? undefined : baseSha;
-  let copied = false;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const head = (await api(`/git/ref/heads/${cfg.branch}`)).data.object.sha;
-    const treeSha = (await api(`/git/commits/${head}`)).data.tree.sha;
-    const manifest = head === S.head && S.manifest
-      ? structuredClone(S.manifest)
-      : await C.decryptManifest(S.keys.enc, await raw(head, "manifest.bin"));
-    const cur = manifest.notes[target]?.sha;
-    if (cur !== expected && cur !== await C.sha256Hex(bytes)) {
-      const choice = await ask("Modifiée ailleurs", `
-        <p>« ${esc(baseName(target))} » ${isNew ? "existe déjà" : "a été modifiée ailleurs depuis que tu l'as ouverte"}.</p>
-        <p>Le plus sûr : enregistrer ta version comme copie, puis comparer.</p>`,
-      [["cancel", "Annuler"], ["overwrite", "Écraser l'autre version"], ["copy", "Enregistrer une copie", true]]);
-      if (choice === "copy") {
-        let n = 1;
-        do { target = C.conflictPath(path, n === 1 ? "conflit" : `conflit ${n}`); n++; } while (manifest.notes[target]);
-        copied = true;
-        expected = undefined;
-        continue;
-      }
-      if (choice !== "overwrite") return null;
-      expected = cur;
-    }
-    const id = await C.noteId(S.keys.name, target);
-    const sha = await C.sha256Hex(bytes);
-    manifest.notes[target] = { id, sha, size: bytes.length, mtime: Date.now() };
-    const noteBlob = await C.encryptBytes(S.keys.enc, bytes, C.noteAad(id));
-    const manifestBlob = await C.encryptManifest(S.keys.enc, manifest);
-    const b1 = (await api("/git/blobs", { method: "POST", body: { content: C.toBase64(noteBlob), encoding: "base64" } })).data.sha;
-    const b2 = (await api("/git/blobs", { method: "POST", body: { content: C.toBase64(manifestBlob), encoding: "base64" } })).data.sha;
-    const tree = (await api("/git/trees", { method: "POST", body: { base_tree: treeSha, tree: [
-      { path: C.noteFile(id), mode: "100644", type: "blob", sha: b1 },
-      { path: "manifest.bin", mode: "100644", type: "blob", sha: b2 },
-    ] } })).data.sha;
-    const date = new Date().toISOString();
-    const who = { ...cfg.author, date };
-    const commit = (await api("/git/commits", { method: "POST",
-      body: { message: "web : 1 note", tree, parents: [head], author: who, committer: who } })).data.sha;
-    const upd = await api(`/git/refs/heads/${cfg.branch}`, { method: "PATCH", body: { sha: commit, force: false }, ok: [409, 422] });
-    if (upd.status === 409 || upd.status === 422) { status("Le carnet a changé entre-temps, nouvelle tentative…"); continue; }
-    S.head = S.ref = commit;
-    S.fallback = false;
-    setManifest(manifest);
-    return { path: target, sha, copied };
-  }
-  throw new Error("Le carnet change trop vite sur GitHub : réessaie dans un instant.");
-}
-
-// ---------- nouvelle note ----------
-function cleanNewPath(folder, name) {
-  const n = name.trim().replace(/\.md$/i, "");
-  if (!n || /[\\:*?"<>|]/.test(n) || n.includes("/")) return null;
-  const f = C.normPath(folder.trim()).replace(/\/+$/, "");
-  if (f.split("/").some((seg) => seg === ".." || seg.startsWith("."))) return null;
-  return (f ? f + "/" : "") + n + ".md";
-}
-
-async function offerCreate(target, folder, { lockFolder = false } = {}) {
-  const defFolder = folder ?? (S.current ? dirName(S.current.path) : "");
-  const res = await ask("Nouvelle note", `
-    <label for="nf">Dossier</label><input id="nf" name="folder" type="text" value="${esc(defFolder)}" spellcheck="false"${lockFolder ? " readonly" : ""}>
-    <label for="nn">Nom</label><input id="nn" name="name" type="text" value="${esc(target ? baseName(target) : "")}">`,
-  [["cancel", "Annuler"], ["ok", "Créer", true]], { input: true });
-  if (res.choice !== "ok") return;
-  startNew(res.folder, res.name);
-}
-
-function startNew(folder, name) {
-  const path = cleanNewPath(folder, name);
-  if (!path) return status("Nom ou dossier invalide (caractères interdits, ou dossier caché).", "error");
-  const existing = Object.keys(S.manifest.notes).find((p) => p.toLowerCase() === path.toLowerCase());
-  if (existing) return openNote(existing);
-  if (S.current) history.pushState({ path }, "", location.pathname);
-  S.current = { path, sha: undefined, text: `# ${baseName(path)}\n\n`, isNew: true };
-  showNote();
-  startEdit(S.current.text);
-}
-$("btn-new").addEventListener("click", () => offerCreate(""));
-
-// ---------- rechargement ----------
-$("btn-refresh").addEventListener("click", async () => {
-  if (S.editing && S.dirty) return status("Enregistre ou annule d'abord ta modification.", "error");
-  status("Rechargement…");
-  try {
-    const head = await latestHead();
-    const ref = head || cfg.branch;
-    setManifest(await C.decryptManifest(S.keys.enc, await raw(ref, "manifest.bin")));
-    Object.assign(S, { ref, head, fallback: !head });
-    renderSide();
-    if (S.current && S.manifest.notes[S.current.path]) await openNote(S.current.path, { push: false });
-    else showHome();
-    status("Carnet à jour.");
-  } catch (err) {
-    status(err.message, "error");
-  }
-});
-
-// ---------- divers ----------
-document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") document.body.classList.remove("side-open");
-});
-window.addEventListener("pageshow", () => { if (!S.keys) $("pass")?.focus(); });
+window.addEventListener("pageshow", () => { if (!store.S.keys) $("pass")?.focus(); });
+matchMedia("(max-width: 900px)").addEventListener("change", () => { if (narrow() && panes.length > 1) closePane(panes[1]); });

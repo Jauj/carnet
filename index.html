@@ -1,54 +1,97 @@
 <!doctype html>
-<html lang="fr">
+<html lang="fr" data-theme="auto">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://api.github.com https://raw.githubusercontent.com; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://api.github.com https://raw.githubusercontent.com; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#8a2b1e">
   <title>Carnet</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
   <link rel="stylesheet" href="style.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
+  <svg class="sprite" aria-hidden="true">
+    <defs>
+      <symbol id="i-files" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></symbol>
+      <symbol id="i-tag" viewBox="0 0 24 24"><path d="M9 4 7 20M17 4l-2 16M4 9h16M3 15h16"/></symbol>
+      <symbol id="i-table" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10"/></symbol>
+      <symbol id="i-today" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="1.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/><path d="M10 14.5h4"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="1.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></symbol>
+      <symbol id="i-right" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M14.5 4.5v15"/></symbol>
+      <symbol id="i-left" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M9.5 4.5v15"/></symbol>
+      <symbol id="i-split" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M12 4.5v15"/></symbol>
+      <symbol id="i-speak" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
+      <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.8 2.5 5.1 5.6.8-4 4 1 5.6-5.1-2.7-5 2.7 1-5.6-4.1-4 5.6-.8z"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/></symbol>
+      <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5 8 12l7 7"/></symbol>
+      <symbol id="i-fwd" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4h-4"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 5v14l12-7z"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+      <symbol id="i-prev" viewBox="0 0 24 24"><path d="M6 5v14M18 5 9 12l9 7z"/></symbol>
+      <symbol id="i-next" viewBox="0 0 24 24"><path d="M18 5v14M6 5l9 7-9 7z"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    </defs>
+  </svg>
+
   <div id="lock" class="lock" hidden>
     <form id="unlock-form" class="lock-box" autocomplete="on">
+      <div class="lock-mark" aria-hidden="true"><svg><use href="#i-lock"/></svg></div>
       <h1>Carnet</h1>
       <label for="pass">Phrase de passe</label>
       <input id="pass" name="password" type="password" autocomplete="current-password" required autofocus>
-      <button type="submit">Déverrouiller</button>
+      <button type="submit" class="primary">Déverrouiller</button>
       <p id="lock-msg" class="msg" role="status"></p>
     </form>
   </div>
 
   <div id="app" hidden>
-    <header class="bar">
-      <button id="btn-side" class="icon" title="Afficher les notes" aria-label="Afficher les notes">☰</button>
-      <div class="title"><span id="crumb" class="crumb"></span><span id="note-title"></span></div>
-      <div class="actions">
-        <button id="btn-new" title="Nouvelle note">＋</button>
-        <button id="btn-edit">Modifier</button>
-        <button id="btn-save" class="primary" hidden>Enregistrer</button>
-        <button id="btn-cancel" hidden>Annuler</button>
-        <button id="btn-refresh" class="icon" title="Recharger le carnet" aria-label="Recharger">↻</button>
-        <button id="btn-lock" title="Verrouiller">Verrouiller</button>
-      </div>
-    </header>
-    <div class="body">
-      <aside id="side">
-        <input id="filter" type="search" placeholder="Filtrer les notes…" autocomplete="off" spellcheck="false">
-        <nav id="tree"></nav>
-        <section id="recents"></section>
-      </aside>
-      <main id="main">
-        <div id="banner" class="banner" hidden></div>
-        <article id="view" class="note"></article>
-        <div id="toolbar" class="toolbar" hidden role="toolbar" aria-label="Mise en forme"></div>
-        <textarea id="editor" hidden spellcheck="true" aria-label="Texte de la note"></textarea>
-      </main>
-    </div>
-    <footer id="status" class="status" role="status"></footer>
+    <nav id="ribbon" aria-label="Menu principal">
+      <button class="rb" data-view="files" title="Fichiers"><svg><use href="#i-files"/></svg></button>
+      <button class="rb" data-view="search" title="Rechercher (Ctrl+Maj+F)"><svg><use href="#i-search"/></svg></button>
+      <button class="rb" data-view="tags" title="Tags"><svg><use href="#i-tag"/></svg></button>
+      <button class="rb" data-view="base" title="Base : tableaux de notes"><svg><use href="#i-table"/></svg></button>
+      <span class="rb-gap"></span>
+      <button class="rb" data-cmd="daily" title="Note du jour (Ctrl+Maj+D)"><svg><use href="#i-today"/></svg></button>
+      <button class="rb" data-cmd="new" title="Nouvelle note (Ctrl+Maj+N)"><svg><use href="#i-plus"/></svg></button>
+      <button class="rb only-wide" data-cmd="split" title="Vue scindée (Ctrl+\)"><svg><use href="#i-split"/></svg></button>
+      <button class="rb only-wide" data-cmd="right" title="Panneau de droite"><svg><use href="#i-right"/></svg></button>
+      <button class="rb" data-cmd="settings" title="Réglages"><svg><use href="#i-gear"/></svg></button>
+      <button class="rb" data-cmd="lock" title="Verrouiller (Maj+clic : oublier aussi le jeton)"><svg><use href="#i-lock"/></svg></button>
+    </nav>
+    <aside id="side" aria-label="Barre latérale">
+      <section class="side-view" data-view="files">
+        <div class="panel-head"><input id="filter" type="search" placeholder="Filtrer par nom…  (Ctrl+K : aller à)" autocomplete="off" spellcheck="false"></div>
+        <div id="files"></div>
+      </section>
+      <section class="side-view" data-view="search" hidden></section>
+      <section class="side-view" data-view="tags" hidden></section>
+      <section class="side-view" data-view="base" hidden></section>
+    </aside>
+    <main id="panes"></main>
+    <aside id="right" aria-label="Panneau de la note">
+      <details open><summary>Plan</summary><div id="r-outline"></div></details>
+      <details open><summary>Rétroliens <span id="r-bl-count" class="count"></span></summary><div id="r-backlinks"></div></details>
+      <details open><summary>Infos</summary><div id="r-infos"></div></details>
+    </aside>
+    <footer id="status">
+      <button id="btn-side" class="only-narrow icon" title="Barre latérale" aria-label="Barre latérale"><svg><use href="#i-menu"/></svg></button>
+      <span id="status-msg" role="status"></span>
+      <span id="status-note"></span>
+      <button id="status-sync" class="linkish" title="Recharger le carnet"></button>
+    </footer>
   </div>
 
   <dialog id="dlg">
@@ -57,6 +100,12 @@
       <div id="dlg-body"></div>
       <div id="dlg-buttons" class="dlg-buttons"></div>
     </form>
+  </dialog>
+
+  <dialog id="qs" class="qs" aria-label="Aller à une note">
+    <input id="qs-input" type="text" placeholder="Aller à une note…   « > » pour les commandes" autocomplete="off" spellcheck="false">
+    <div id="qs-list" class="qs-list" role="listbox"></div>
+    <div class="qs-foot">↑↓ choisir · Entrée ouvrir · Ctrl+Entrée nouvel onglet · Maj+Entrée à côté · Échap fermer</div>
   </dialog>
 </body>
 </html>
