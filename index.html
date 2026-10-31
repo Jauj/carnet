@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://api.github.com https://raw.githubusercontent.com; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://api.github.com https://raw.githubusercontent.com; media-src blob:; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow">
   <meta name="theme-color" content="#8a2b1e">
@@ -42,6 +42,7 @@
       <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
       <symbol id="i-prev" viewBox="0 0 24 24"><path d="M6 5v14M18 5 9 12l9 7z"/></symbol>
       <symbol id="i-next" viewBox="0 0 24 24"><path d="M18 5v14M6 5l9 7-9 7z"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></symbol>
       <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
     </defs>
   </svg>
@@ -68,6 +69,7 @@
       <button class="rb" data-cmd="new" title="Nouvelle note (Ctrl+Maj+N)"><svg><use href="#i-plus"/></svg></button>
       <button class="rb only-wide" data-cmd="split" title="Vue scindée (Ctrl+\)"><svg><use href="#i-split"/></svg></button>
       <button class="rb only-wide" data-cmd="right" title="Panneau de droite"><svg><use href="#i-right"/></svg></button>
+      <button class="rb" data-cmd="night" title="Mode nuit"><svg><use href="#i-moon"/></svg></button>
       <button class="rb" data-cmd="settings" title="Réglages"><svg><use href="#i-gear"/></svg></button>
       <button class="rb" data-cmd="lock" title="Verrouiller (Maj+clic : oublier aussi le jeton)"><svg><use href="#i-lock"/></svg></button>
     </nav>

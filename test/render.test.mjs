@@ -17,3 +17,18 @@ test("section d'une note pour ![[Note#Section]]", () => {
   assert.equal(sectionOf(t, "B"), "## B\ntexte B");
   assert.match(sectionOf(t, "Z"), /introuvable/);
 });
+
+test("très longue note découpée avant les titres, jamais dans un bloc de code ni dans une liste", async () => {
+  const { splitMarkdown } = await import("../render.js");
+  const para = "Un paragraphe de texte assez long pour remplir le morceau. ".repeat(20) + "\n\n";
+  let body = "";
+  for (let i = 0; i < 40; i++) body += `## Partie ${i}\n\n${para}\`\`\`\n## pas un titre (code)\n\`\`\`\n\n- élément\n\n- élément suivant de la même liste\n\n${para}`;
+  const parts = splitMarkdown(body, 8000);
+  assert.ok(parts.length > 5);
+  assert.equal(parts.join("\n"), body);
+  for (const p of parts.slice(1)) assert.match(p, /^## Partie \d+/);
+  const prose = (para.repeat(200));
+  const pp = splitMarkdown(prose, 8000);
+  assert.ok(pp.length > 3);
+  assert.equal(pp.join("\n"), prose);
+});

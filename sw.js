@@ -2,10 +2,10 @@
 //   - le code de la page : réseau d'abord (toujours la dernière version), cache si hors ligne ;
 //   - les fichiers chiffrés lus à un commit précis (immuables) : cache d'abord.
 // Le cache ne contient que ce que GitHub sert déjà publiquement : du code et des fichiers chiffrés.
-const SHELL = "carnet-page-v1";
+const SHELL = "carnet-page-v2";
 const DATA = "carnet-donnees";
 const FILES = ["./", "index.html", "style.css", "app.js", "store.js", "render.js", "panels.js", "editor.js", "tts.js",
-  "notes.js", "search.js", "crypto.js", "config.js", "vendor/marked.esm.js", "vendor/purify.es.mjs", "icon.svg", "icon-192.png", "icon-512.png", "manifest.webmanifest"];
+  "notes.js", "search.js", "night.js", "tts-piper.js", "crypto.js", "config.js", "vendor/marked.esm.js", "vendor/purify.es.mjs", "icon.svg", "icon-192.png", "icon-512.png", "manifest.webmanifest"];
 const MAX_DATA = 3000;
 
 self.addEventListener("install", (e) => {

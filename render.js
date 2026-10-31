@@ -88,11 +88,46 @@ export function renderProps(yaml) {
   return `<div class="props">${rows.join("")}</div>`;
 }
 
+export const renderChunk = (markdown) =>
+  DOMPurify.sanitize(md.parse(markdown), { FORBID_ATTR: ["style"], FORBID_TAGS: ["style", "img"] });
+
 export function renderMarkdown(text, { props = true } = {}) {
   const { yaml, body } = N.splitFrontmatter(text);
-  const html = md.parse(stripComments(body));
-  const clean = DOMPurify.sanitize(html, { FORBID_ATTR: ["style"], FORBID_TAGS: ["style", "img"] });
-  return (props ? renderProps(yaml) : "") + clean;
+  return (props ? renderProps(yaml) : "") + renderChunk(stripComments(body));
+}
+
+// Très longue note : propriétés + morceaux de Markdown à afficher l'un après l'autre (voir app.js),
+// pour que la page ne se fige pas pendant le rendu.
+export function renderChunks(text, size = 60000) {
+  const { yaml, body } = N.splitFrontmatter(text);
+  return { props: renderProps(yaml), chunks: splitMarkdown(stripComments(body), size) };
+}
+
+// Coupe de préférence avant un titre ; à défaut (texte sans titres), sur une ligne vide hors liste
+// et hors citation. Jamais dans un bloc de code.
+export function splitMarkdown(body, size = 60000) {
+  if (body.length <= size * 1.5) return [body];
+  const out = [];
+  let cur = [], len = 0, fence = null;
+  const lines = body.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const f = /^[ \t]*(`{3,}|~{3,})/.exec(line);
+    if (f) {
+      if (!fence) fence = f[1];
+      else if (f[1][0] === fence[0] && f[1].length >= fence.length && !line.trim().slice(f[1].length).trim()) fence = null;
+    }
+    if (!fence && len >= size && cur.length) {
+      const next = lines[i + 1] ?? "";
+      const heading = /^#{1,6}[ \t]/.test(line);
+      const blank = !line.trim() && len >= size * 2 && !/^([ \t]|[-*+>][ \t]|\d+[.)][ \t]|\|)/.test(next);
+      if (heading || blank) { out.push(cur.join("\n")); cur = []; len = 0; }
+    }
+    cur.push(line);
+    len += line.length + 1;
+  }
+  if (cur.length) out.push(cur.join("\n"));
+  return out;
 }
 
 // Section d'une note (pour ![[Note#Section]]) : du titre jusqu'au titre suivant de même niveau ou plus haut.
@@ -122,7 +157,8 @@ const CALLOUT_FAMILY = {
 
 // Liens résolus, liens externes, callouts, cases à cocher numérotées, intégrations.
 // depth : profondeur d'intégration (une note intégrée n'intègre pas à son tour).
-export function decorate(root, from, { depth = 0 } = {}) {
+// Renvoie le numéro de la prochaine case à cocher (taskStart : numéro de la première de ce morceau).
+export function decorate(root, from, { depth = 0, taskStart = 0 } = {}) {
   for (const a of root.querySelectorAll("a.wl")) {
     const p = store.resolveLink(a.dataset.target, from);
     if (p) a.dataset.path = p; else { a.classList.add("missing"); a.title = "Note absente : cliquer pour la créer"; }
@@ -162,8 +198,8 @@ export function decorate(root, from, { depth = 0 } = {}) {
     bq.replaceWith(box);
   }
   // Cases à cocher : numérotées dans l'ordre du texte source (hors notes intégrées), pour pouvoir les cocher.
+  let i = taskStart;
   if (depth === 0) {
-    let i = 0;
     for (const cb of root.querySelectorAll('input[type="checkbox"]')) {
       if (cb.closest(".embed")) continue;
       cb.disabled = false;
@@ -181,6 +217,7 @@ export function decorate(root, from, { depth = 0 } = {}) {
     wrap.append(t);
   }
   for (const e of root.querySelectorAll("span.embed")) fillEmbed(e, from, depth);
+  return i;
 }
 
 async function fillEmbed(el, from, depth) {

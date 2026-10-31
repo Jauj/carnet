@@ -70,3 +70,25 @@ test("plages et extraits : accents conservés, expression exacte vérifiée", ()
   const s = snippets(text, matchRanges(text, parseQuery("révolution")), { radius: 10 });
   assert.equal(s[0].text.slice(s[0].marks[0][0], s[0].marks[0][1]), "Révolution");
 });
+
+test("repli d'un texte de 1 Mo rapide, et identique au repli caractère par caractère", async () => {
+  const { foldWithMap } = await import("../search.js");
+  const words = "La Révolution française État Œuvre ouvriers Пролетарии всех стран 😀 straße".split(" ");
+  let t = "";
+  for (let i = 0; t.length < 1_000_000; i++) t += words[i % words.length] + (i % 9 ? " " : ". ");
+  foldWithMap(t);
+  const s = performance.now();
+  const { f, map } = foldWithMap(t);
+  assert.ok(performance.now() - s < 250, `trop lent : ${Math.round(performance.now() - s)} ms`);
+  const sample = t.slice(0, 2000);
+  let ref = "", i = 0;
+  const rmap = [];
+  for (const ch of sample) { const g = fold(ch); for (let k = 0; k < g.length; k++) rmap.push(i); ref += g; i += ch.length; }
+  assert.equal(f.slice(0, ref.length), ref);
+  assert.deepEqual([...map.slice(0, rmap.length)], rmap);
+});
+
+test("matchRanges : limite du nombre d'occurrences", () => {
+  const text = "mot ".repeat(1000);
+  assert.equal(matchRanges(text, parseQuery("mot"), 5).length, 5);
+});

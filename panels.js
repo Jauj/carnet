@@ -41,6 +41,19 @@ function plain(text) {
     .replace(/%%[\s\S]*?%%/g, "");
 }
 
+// Texte lisible et replié des dernières notes consultées (extraits sans recalcul).
+const foldCache = new Map();
+async function foldedPlain(path) {
+  const note = await store.readNote(path);
+  const hit = foldCache.get(path);
+  if (hit && hit.sha === note.sha) { foldCache.delete(path); foldCache.set(path, hit); return hit.folded; }
+  const text = plain(note.text);
+  const folded = { ...X.foldWithMap(text), text };
+  foldCache.set(path, { sha: note.sha, folded });
+  if (foldCache.size > 30) foldCache.delete(foldCache.keys().next().value);
+  return folded;
+}
+
 // ---------- recherche ----------
 export function searchPanel(root, ui) {
   root.innerHTML = `
@@ -57,11 +70,12 @@ export function searchPanel(root, ui) {
   const input = root.querySelector("input");
   const info = root.querySelector(".search-info");
   const list = root.querySelector(".search-results");
-  let run = 0, timer = 0;
+  let run = 0, timer = 0, stopSnippets = () => {};
 
   async function go() {
     const q = input.value.trim();
     const me = ++run;
+    stopSnippets();
     list.innerHTML = "";
     info.textContent = "";
     if (!q) { renderRecentSearches(); return; }
@@ -82,36 +96,68 @@ export function searchPanel(root, ui) {
     more.addEventListener("click", () => page());
     list.after(more);
     root.querySelectorAll(".more").forEach((b) => b !== more && b.remove());
-    async function page() {
-      more.hidden = true;
-      const end = Math.min(results.length, shown + 25);
-      for (; shown < end; shown++) {
+
+    // Extraits : seulement pour les résultats visibles, deux notes à la fois, en rendant la main entre deux.
+    const queue = [];
+    let active = 0;
+    const observer = needText ? new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        observer.unobserve(en.target);
+        queue.push(en.target);
+      }
+      pump();
+    }, { root: root.closest("#side") || null, rootMargin: "200px" }) : null;
+    stopSnippets = () => observer?.disconnect();
+    async function pump() {
+      while (active < 2 && queue.length && me === run) {
+        active++;
+        const item = queue.shift();
+        snippetFor(item).finally(() => { active--; pump(); });
+      }
+    }
+    async function snippetFor(item) {
+      const path = item.dataset.path;
+      const box = item.querySelector(".snip.pending");
+      const e = store.notes()[path];
+      if (!e) return;
+      if (e.size > 3_000_000) { box.textContent = "(très longue note : extrait non affiché)"; box.classList.remove("pending"); return; }
+      try {
+        const folded = await foldedPlain(path);
         if (me !== run) return;
+        await new Promise((r) => setTimeout(r, 0));
+        const ranges = X.matchFolded(folded, query, 8);
+        if (ranges === null) { item.remove(); return; } // expression exacte absente
+        box.remove();
+        for (const sn of X.snippets(folded.text, ranges)) {
+          const d = el("div", { className: "snip" });
+          if (sn.head) d.append("… ");
+          d.append(marked(sn.text.replace(/\s+/g, " "), remap(sn.text, sn.marks)));
+          if (sn.tail) d.append(" …");
+          item.append(d);
+        }
+      } catch (err) { box.textContent = err.message; box.classList.remove("pending"); }
+    }
+
+    function page() {
+      more.hidden = true;
+      const end = Math.min(results.length, shown + 50);
+      const frag = document.createDocumentFragment();
+      for (; shown < end; shown++) {
         const { path } = results[shown];
         const item = el("div", { className: "hit" });
+        item.dataset.path = path;
         item.append(noteLink(path, { sub: dirName(path) }));
-        list.append(item);
-        if (!needText) continue;
-        const e = store.notes()[path];
-        if (e.size > 3_000_000) { item.append(el("div", { className: "snip hint", textContent: "(très longue note : extrait non affiché)" })); continue; }
-        try {
-          const text = plain((await store.readNote(path)).text);
-          if (me !== run) return;
-          const ranges = X.matchRanges(text, query);
-          if (ranges === null) { item.remove(); continue; } // expression exacte absente
-          for (const s of X.snippets(text, ranges)) {
-            const d = el("div", { className: "snip" });
-            if (s.head) d.append("… ");
-            d.append(marked(s.text.replace(/\s+/g, " "), remap(s.text, s.marks)));
-            if (s.tail) d.append(" …");
-            item.append(d);
-          }
-        } catch (err) { item.append(el("div", { className: "snip hint", textContent: err.message })); }
+        if (needText) { item.append(el("div", { className: "snip pending", textContent: "…" })); }
+        frag.append(item);
       }
+      list.append(frag);
+      if (observer) for (const it of list.querySelectorAll(".hit:has(.snip.pending)")) observer.observe(it);
       more.hidden = shown >= results.length;
     }
-    await page();
+    page();
   }
+
   // Les extraits ont leurs espaces compactés : on recalcule les positions des marques.
   function remap(text, marks) {
     const map = [];
@@ -135,7 +181,12 @@ export function searchPanel(root, ui) {
       list.append(b);
     }
   }
-  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(go, 350); });
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const v = input.value.trim();
+    if (v && v.length < 2) return;
+    timer = setTimeout(go, 450);
+  });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(timer); go(); } });
   list.addEventListener("click", (e) => {
     const a = e.target.closest("a[data-path]");
@@ -176,7 +227,7 @@ export function tagsPanel(root, ui) {
 }
 
 // ---------- panneau droit : plan, rétroliens, infos ----------
-export function outline(root, view, scroller) {
+export function outline(root, view, scroller, onRead) {
   root.innerHTML = "";
   const hs = [...view.querySelectorAll(":scope > .heading, :scope > .callout .heading")].filter((h) => !h.closest(".embed"));
   if (!hs.length) { root.append(el("p", { className: "hint", textContent: "Pas de titres dans cette note." })); return () => {}; }
@@ -185,7 +236,13 @@ export function outline(root, view, scroller) {
     const b = el("button", { className: "ol-item", textContent: h.textContent, title: h.textContent });
     b.style.paddingLeft = `${(Number(h.tagName[1]) - min) * 12 + 6}px`;
     b.addEventListener("click", () => { h.scrollIntoView({ behavior: "smooth", block: "start" }); });
-    root.append(b);
+    const row = el("div", { className: "ol-row" }, b);
+    if (onRead) {
+      const r = el("button", { className: "ol-read", textContent: "▶", title: "Lire à voix haute à partir de ce titre", type: "button" });
+      r.addEventListener("click", () => onRead(h));
+      row.append(r);
+    }
+    root.append(row);
     return b;
   });
   // Section en cours, suivie au défilement.

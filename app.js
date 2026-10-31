@@ -3,11 +3,12 @@
 import cfg from "./config.js";
 import * as C from "./crypto.js";
 import * as store from "./store.js";
-import { renderMarkdown, decorate, esc, toggleTask } from "./render.js";
+import { renderMarkdown, renderChunks, renderChunk, decorate, esc, toggleTask } from "./render.js";
 import * as P from "./panels.js";
 import { attachEditor, buildToolbar } from "./editor.js";
 import * as TTS from "./tts.js";
 import { parseQuery, matchRanges } from "./search.js";
+import * as Night from "./night.js";
 
 const { baseName, dirName, fold } = store;
 const $ = (id) => document.getElementById(id);
@@ -29,14 +30,22 @@ const PREFS_KEY = "carnet.prefs";
 const DEFAULT_PREFS = {
   theme: "auto", font: "sans", size: 17, width: 760, line: 1.65,
   lockMinutes: cfg.lockMinutes ?? 30, hiddenLockMinutes: cfg.hiddenLockMinutes ?? 5,
-  voice: "", rate: 1, right: true, side: true, sideView: "files", editPreview: false,
+  voice: "", rate: 1, pitch: 1, ttsEngine: "", piperVoice: "fr_FR-siwis-medium", piperSpeaker: 0, onlineVoiceOk: false,
+  nightAuto: false, nightFrom: "21:00", nightTo: "07:00", nightDim: 0, nightOverride: null,
+  right: true, side: true, sideView: "files", editPreview: false,
 };
 let prefs = { ...DEFAULT_PREFS };
 try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREFS_KEY) || "{}")); } catch {}
 function savePrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {} applyPrefs(); }
+const THEME_COLORS = { light: "#8a2b1e", dark: "#1c1c1f", sepia: "#8a3a1e", night: "#000000" };
 function applyPrefs() {
   const r = document.documentElement;
-  r.dataset.theme = prefs.theme;
+  const theme = Night.effectiveTheme(prefs);
+  r.dataset.theme = theme;
+  r.style.setProperty("--night-dim", theme === "night" ? String(prefs.nightDim || 0) : "0");
+  const dark = theme === "dark" || theme === "night" || (theme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", THEME_COLORS[theme] || (dark ? THEME_COLORS.dark : THEME_COLORS.light));
+  document.querySelector('.rb[data-cmd="night"]')?.classList.toggle("on", theme === "night");
   r.dataset.font = prefs.font;
   r.style.setProperty("--read-size", prefs.size + "px");
   r.style.setProperty("--read-width", prefs.width + "px");
@@ -45,6 +54,13 @@ function applyPrefs() {
   document.body.classList.toggle("no-right", !prefs.right);
 }
 applyPrefs();
+// Mode nuit programmé : vérifié chaque minute et au retour sur l'onglet.
+setInterval(applyPrefs, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) applyPrefs(); });
+function toggleNight() {
+  Object.assign(prefs, Night.toggledOverride(prefs));
+  savePrefs();
+}
 
 // ---------- préférences privées (chiffrées avec la clé locale, après déverrouillage) ----------
 let priv = null;
@@ -57,6 +73,7 @@ let panes = [];
 let activePane = null;
 let tabSeq = 0;
 const reader = new TTS.Reader((state) => updateTtsBar(state));
+reader.onError = (err) => status("Lecture à voix haute : " + err.message, "error");
 let readerTab = null;
 
 function status(msg, kind = "") {
@@ -525,17 +542,26 @@ function buildNoteView(tab) {
   actions.append(bEdit, bSave, bCancel, bPrev, bTts, bFav, bMore);
   head.append(nav, crumbs, actions);
 
-  const ttsBar = el("div", { className: "tts-bar", hidden: true });
-  const tPrev = iconBtn("prev", "Phrase précédente"), tPlay = iconBtn("pause", "Pause / reprise"), tNext = iconBtn("next", "Phrase suivante"), tStop = iconBtn("stop", "Arrêter");
+  const ttsBar = el("div", { className: "tts-bar", hidden: true, role: "toolbar" });
+  ttsBar.setAttribute("aria-label", "Lecture à voix haute");
+  const tb = (ic, title, fn) => { const b = iconBtn(ic, title); b.addEventListener("click", fn); return b; };
+  const tPlay = tb("pause", "Pause / reprise (Alt+P)", () => reader.toggle());
+  const tVoice = el("select", { className: "tts-voice", title: "Voix" });
   const tRate = el("select", { title: "Vitesse" });
-  for (const r of [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]) tRate.append(el("option", { value: r, textContent: `×${r}`, selected: r === prefs.rate }));
-  ttsBar.append(el("span", { className: "tts-label", textContent: "Lecture" }), tPrev, tPlay, tNext, tStop, tRate);
-  tPrev.addEventListener("click", () => reader.skip(-1));
-  tNext.addEventListener("click", () => reader.skip(1));
-  tPlay.addEventListener("click", () => reader.toggle());
-  tStop.addEventListener("click", () => reader.stop());
-  tRate.addEventListener("change", () => { prefs.rate = Number(tRate.value); savePrefs(); if (reader.state !== "stopped") startReading(tab); });
-
+  for (const r of RATES) tRate.append(el("option", { value: r, textContent: `×${r}`, selected: r === prefs.rate }));
+  ttsBar.append(
+    el("span", { className: "tts-label", textContent: "Lecture" }),
+    tb("prev", "Paragraphe précédent (Alt+Maj+J) — Maj+clic : section", (e) => reader.skip(-1, e.shiftKey ? "section" : "block")),
+    tb("back", "Phrase précédente (Alt+J)", () => reader.skip(-1)),
+    tPlay,
+    tb("fwd", "Phrase suivante (Alt+L)", () => reader.skip(1)),
+    tb("next", "Paragraphe suivant (Alt+Maj+L) — Maj+clic : section", (e) => reader.skip(1, e.shiftKey ? "section" : "block")),
+    tb("stop", "Arrêter (Alt+K)", () => reader.stop()),
+    tVoice, tRate,
+    el("span", { className: "tts-hint hint", textContent: "Clic sur un paragraphe : y aller" }));
+  tRate.addEventListener("change", () => { prefs.rate = Number(tRate.value); savePrefs(); reader.setRate(prefs.rate); syncRateSelects(); });
+  tVoice.addEventListener("focus", () => fillVoiceSelect(tVoice));
+  tVoice.addEventListener("change", () => changeVoice(tVoice.value));
   const banner = el("div", { className: "doc-banner", hidden: true });
   const toolbar = el("div", { className: "toolbar", hidden: true, role: "toolbar" });
   toolbar.setAttribute("aria-label", "Mise en forme");
@@ -550,7 +576,7 @@ function buildNoteView(tab) {
   pscroll.append(preview);
   main.append(scroll, editor, pscroll);
   tab.el.append(head, ttsBar, banner, toolbar, main);
-  Object.assign(tab, { ui: { back, fwd, crumbs, bEdit, bSave, bCancel, bPrev, bTts, bFav, bMore, ttsBar, tPlay, banner, toolbar, scroll, view, editor, pscroll, preview } });
+  Object.assign(tab, { ui: { back, fwd, crumbs, bEdit, bSave, bCancel, bPrev, bTts, bFav, bMore, ttsBar, tPlay, tVoice, tRate, banner, toolbar, scroll, view, editor, pscroll, preview } });
 
   buildToolbar(toolbar, () => editor);
   tab.completion = attachEditor(editor, { suggest: linkSuggestions });
@@ -563,7 +589,22 @@ function buildNoteView(tab) {
   bSave.addEventListener("click", () => save(tab));
   bCancel.addEventListener("click", () => cancelEdit(tab));
   bPrev.addEventListener("click", () => { prefs.editPreview = pscroll.hidden; savePrefs(); setPreview(tab, prefs.editPreview); });
-  bTts.addEventListener("click", () => (readerTab === tab && reader.state !== "stopped" ? reader.stop() : startReading(tab)));
+  bTts.title = "Lire à voix haute : depuis l'endroit affiché, ou la sélection. Alt+clic sur un paragraphe : lire à partir de là.";
+  bTts.addEventListener("click", () => {
+    if (readerTab === tab && reader.state !== "stopped") return reader.stop();
+    const sel = getSelection();
+    const range = sel.rangeCount && !sel.isCollapsed && view.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
+    startReading(tab, range ? { range } : {});
+  });
+  // Pendant la lecture, un clic sur un paragraphe y fait sauter ; Alt+clic lance la lecture à partir de là.
+  view.addEventListener("click", (e) => {
+    if (e.target.closest("a, input, button, summary, label") || !getSelection().isCollapsed) return;
+    const reading = readerTab === tab && reader.state !== "stopped";
+    if (!reading && !e.altKey) return;
+    e.preventDefault();
+    if (reading) reader.jumpToElement(e.target);
+    else startReading(tab, { from: e.target });
+  });
   bFav.addEventListener("click", () => toggleFavorite(tab.path));
   bMore.addEventListener("click", () => noteMenu(tab, bMore));
   view.addEventListener("change", (e) => { if (e.target.matches("input[data-task]")) toggleTaskBox(tab, e.target); });
@@ -617,10 +658,7 @@ async function loadInto(tab, path, { anchor, highlight, scroll } = {}) {
     tab.note = note;
     tab.readOnly = !note.valid;
     stopEditUi(tab);
-    renderNote(tab);
-    if (highlight) highlightIn(tab.ui.view, tab.ui.scroll, highlight);
-    else if (anchor) scrollToHeading(tab, anchor);
-    else tab.ui.scroll.scrollTop = scroll || 0;
+    renderNote(tab, { anchor, highlight, scroll: scroll || 0 });
     if (!note.valid) status("Fichier qui n'est pas en UTF-8 : lecture seule sur la page.");
     else if ($("status-msg").textContent === "Ouverture…") status("");
   } catch (err) {
@@ -631,7 +669,10 @@ async function loadInto(tab, path, { anchor, highlight, scroll } = {}) {
   saveSession();
 }
 
-function renderNote(tab) {
+// Affiche la note. Une très longue note est affichée par morceaux (le début tout de suite, la suite
+// quand le navigateur est libre) ; tab.rendered se résout quand tout est là.
+//   anchor / highlight / scroll / scrollRatio : position à atteindre (dès que le morceau voulu est affiché)
+function renderNote(tab, { anchor, highlight, scroll, scrollRatio } = {}) {
   const u = tab.ui;
   u.crumbs.innerHTML = "";
   const parts = dirName(tab.path) ? dirName(tab.path).split("/") : [];
@@ -642,9 +683,41 @@ function renderNote(tab) {
     u.crumbs.append(b, el("span", { className: "sep", textContent: "›" }));
   });
   u.crumbs.append(el("span", { className: "doc-title", textContent: baseName(tab.path) }));
-  u.view.innerHTML = renderMarkdown(tab.note.text);
-  decorate(u.view, tab.path);
-  if (!u.view.textContent.trim()) u.view.innerHTML = `<p class="empty">Note vide.</p>`;
+  const token = (tab.renderToken = (tab.renderToken || 0) + 1);
+  const { props, chunks } = renderChunks(tab.note.text);
+  u.view.innerHTML = props;
+  const q = highlight ? parseQuery(highlight) : null;
+  let task = 0, marks = 0, placed = !anchor && !q?.terms.length;
+  const add = (markdown) => {
+    const tmp = document.createElement("div");
+    tmp.innerHTML = renderChunk(markdown);
+    task = decorate(tmp, tab.path, { taskStart: task });
+    if (q?.terms.length && marks < 300) marks += highlightNodes(tmp, q, 300 - marks);
+    u.view.append(...tmp.childNodes);
+    if (!placed) {
+      const target = q?.terms.length ? u.view.querySelector("mark.hit") : findHeading(tab, anchor);
+      if (target) {
+        placed = true;
+        target.classList.add("first");
+        requestAnimationFrame(() => target.scrollIntoView({ block: q?.terms.length ? "center" : "start" }));
+      }
+    }
+  };
+  add(chunks[0]);
+  if (!anchor && !q) u.scroll.scrollTop = scrollRatio !== undefined ? scrollRatio * u.scroll.scrollHeight : scroll || 0;
+  tab.rendered = (async () => {
+    for (let i = 1; i < chunks.length; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      if (token !== tab.renderToken) return;
+      add(chunks[i]);
+    }
+    if (token !== tab.renderToken) return;
+    if (!u.view.textContent.trim()) u.view.innerHTML = `<p class="empty">Note vide.</p>`;
+    if (chunks.length > 1) {
+      if (!anchor && !q && (scroll || scrollRatio)) u.scroll.scrollTop = scrollRatio !== undefined ? scrollRatio * u.scroll.scrollHeight : scroll;
+      if (activeTab() === tab) updateRight();
+    }
+  })();
   u.bFav.classList.toggle("on", priv.favorites.includes(tab.path));
   u.back.disabled = !tab.back.length;
   u.fwd.disabled = !tab.fwd.length;
@@ -660,39 +733,38 @@ function goHistory(tab, dir) {
   if (store.exists(it.path)) loadInto(tab, it.path, { scroll: it.scroll });
 }
 
-function scrollToHeading(tab, anchor) {
+function findHeading(tab, anchor) {
   const want = fold(anchor.replace(/^\^/, ""));
-  const h = [...tab.ui.view.querySelectorAll(".heading")].find((e) => fold(e.textContent) === want);
+  return [...tab.ui.view.querySelectorAll(".heading")].find((e) => fold(e.textContent) === want);
+}
+async function scrollToHeading(tab, anchor) {
+  let h = findHeading(tab, anchor);
+  if (!h) { await tab.rendered; h = findHeading(tab, anchor); }
   h?.scrollIntoView({ block: "start" });
 }
 
-// Surligne dans la note les mots d'une recherche et va à la première occurrence.
-function highlightIn(view, scroller, qText) {
-  const q = parseQuery(qText);
-  if (!q.terms.length) return;
-  const walker = document.createTreeWalker(view, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement.closest("mark, .props, script") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
+// Surligne dans root les mots d'une recherche (au plus max marques). Renvoie le nombre de marques.
+function highlightNodes(root, q, max = 300) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement.closest("mark, .props, script") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
   const nodes = [];
   for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
-  let first = null;
+  let count = 0;
+  const qq = { ...q, phrases: [] };
   for (const n of nodes) {
-    const ranges = matchRanges(n.data, { ...q, phrases: [] });
+    if (count >= max) break;
+    const ranges = matchRanges(n.data, qq, max - count);
     if (!ranges?.length) continue;
     const frag = document.createDocumentFragment();
     let at = 0;
     for (const [a, b] of ranges) {
-      frag.append(n.data.slice(at, a));
-      const m = el("mark", { className: "hit", textContent: n.data.slice(a, b) });
-      frag.append(m);
-      first ||= m;
+      frag.append(n.data.slice(at, a), el("mark", { className: "hit", textContent: n.data.slice(a, b) }));
       at = b;
+      count++;
     }
     frag.append(n.data.slice(at));
     n.replaceWith(frag);
   }
-  if (first) {
-    first.classList.add("first");
-    requestAnimationFrame(() => first.scrollIntoView({ block: "center" }));
-  }
+  return count;
 }
 
 // ---------- édition ----------
@@ -780,8 +852,7 @@ async function save(tab) {
     tab.dirty = false;
     saveDraftsNow();
     stopEditUi(tab);
-    renderNote(tab);
-    tab.ui.scroll.scrollTop = (tab.editScrollRatio || 0) * tab.ui.scroll.scrollHeight;
+    renderNote(tab, { scrollRatio: tab.editScrollRatio || 0 });
     updateRight();
     status(res.copied.length ? `Enregistré comme copie : « ${baseName(path)} ».` : "Enregistré.");
   } catch (err) {
@@ -995,13 +1066,109 @@ function toggleFavorite(path) {
 }
 
 // ---------- lecture à voix haute ----------
-function startReading(tab) {
-  try {
-    if (readerTab && readerTab !== tab) readerTab.ui.ttsBar.hidden = true;
-    readerTab = tab;
-    reader.start(tab.ui.view, { scroller: tab.ui.scroll, voiceName: prefs.voice, rate: prefs.rate });
-  } catch (err) { status(err.message, "error"); }
+const RATES = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5];
+
+// Réglages de voix courants, sous forme de clé : "piper:<voix>:<locuteur>" ou "browser:<nom>".
+const voiceKey = () => (prefs.ttsEngine === "piper" ? `piper:${prefs.piperVoice}:${prefs.piperSpeaker}` : `browser:${prefs.voice}`);
+function voiceSettings() {
+  return { engine: prefs.ttsEngine === "piper" ? "piper" : "browser", voice: prefs.piperVoice, speaker: prefs.piperSpeaker, voiceName: prefs.voice, rate: prefs.rate, pitch: prefs.pitch };
 }
+
+let piperState = null; // { engine, voices: { id: téléchargée? }, sizes, engineSize }
+async function refreshPiperState() {
+  try { piperState = await TTS.piperStatus(); } catch { piperState = null; }
+  return piperState;
+}
+const mo = (n) => `${Math.round(n / 1e6)} Mo`;
+
+function fillVoiceSelect(sel) {
+  const cur = voiceKey();
+  sel.innerHTML = "";
+  const g1 = el("optgroup", { label: "Voix neuronales (Piper, hors ligne, privées)" });
+  for (const v of TTS.PIPER_VOICES) {
+    const ready = piperState?.voices?.[v.id];
+    const size = piperState ? ` · ${ready ? "téléchargée" : "à télécharger, " + mo((piperState.sizes[v.id] || 0) + (piperState.engine ? 0 : piperState.engineSize))}` : "";
+    for (const [spk, name] of v.speakers || [["0", v.label]]) {
+      g1.append(el("option", { value: `piper:${v.id}:${spk}`, textContent: (v.speakers ? `${v.label} – ${name}` : name) + size, selected: cur === `piper:${v.id}:${spk}` }));
+    }
+  }
+  sel.append(g1);
+  const voices = TTS.browserVoices();
+  if (voices.length) {
+    const g2 = el("optgroup", { label: "Voix du navigateur" });
+    g2.append(el("option", { value: "browser:", textContent: "Voix française par défaut", selected: cur === "browser:" }));
+    for (const v of voices) g2.append(el("option", { value: `browser:${v.name}`, textContent: `${v.name} (${v.lang})${TTS.isOnline(v) ? " · en ligne" : ""}`, selected: cur === `browser:${v.name}` }));
+    sel.append(g2);
+  }
+}
+
+// Accepter (une fois) qu'une voix en ligne reçoive le texte lu ; télécharger une voix Piper au besoin.
+async function confirmVoice(key) {
+  if (key.startsWith("browser:")) {
+    const v = TTS.browserVoices().find((x) => x.name === key.slice(8));
+    if (v && TTS.isOnline(v) && !prefs.onlineVoiceOk) {
+      if (!(await confirmBox("Voix en ligne", `<p>« ${esc(v.name)} » est une voix <b>en ligne</b> : le texte lu est envoyé au service de l'éditeur du navigateur (Microsoft, Google…).</p>
+        <p>Les voix neuronales Piper, elles, fonctionnent entièrement sur cet appareil.</p>`, "Utiliser quand même"))) return false;
+      prefs.onlineVoiceOk = true;
+    }
+    return true;
+  }
+  const id = key.split(":")[1];
+  await refreshPiperState();
+  if (piperState?.voices?.[id]) return true;
+  const total = (piperState?.sizes?.[id] || 0) + (piperState && !piperState.engine ? piperState.engineSize : 0);
+  return confirmBox("Télécharger la voix", `<p>Cette voix neuronale doit être téléchargée une seule fois (<b>${mo(total)}</b>), puis elle fonctionne hors ligne.</p>
+    <p class="hint">Fichiers figés et vérifiés par empreinte : moteur depuis jsDelivr, voix depuis le dépôt officiel Piper (Hugging Face). Le texte des notes n'est jamais envoyé.</p>`, "Télécharger");
+}
+
+function applyVoiceKey(key) {
+  if (key.startsWith("piper:")) { const [, id, spk] = key.split(":"); Object.assign(prefs, { ttsEngine: "piper", piperVoice: id, piperSpeaker: Number(spk || 0) }); }
+  else Object.assign(prefs, { ttsEngine: "browser", voice: key.slice(8) });
+  savePrefs();
+}
+
+const progressStatus = (label) => (loaded, total) => status(`${label} : ${Math.round((loaded / total) * 100)} %`);
+
+async function changeVoice(key) {
+  if (!(await confirmVoice(key))) { for (const t of allTabs()) if (t.ui?.tVoice) fillVoiceSelect(t.ui.tVoice); return; }
+  applyVoiceKey(key);
+  await reader.changeVoice(voiceSettings(), progressStatus("Préparation de la voix"));
+  await refreshPiperState();
+  status("");
+  for (const t of allTabs()) if (t.ui?.tVoice) fillVoiceSelect(t.ui.tVoice);
+}
+
+function syncRateSelects() { for (const t of allTabs()) if (t.ui?.tRate) t.ui.tRate.value = String(prefs.rate); }
+
+// Premier usage : choisir entre la voix neuronale (meilleure, à télécharger) et celle du navigateur.
+async function chooseEngineOnce() {
+  if (prefs.ttsEngine) return true;
+  await refreshPiperState();
+  const size = piperState ? mo(piperState.sizes["fr_FR-siwis-medium"] + (piperState.engine ? 0 : piperState.engineSize)) : "≈ 90 Mo";
+  const c = await ask("Lecture à voix haute", `<p><b>Voix neuronale</b> (Piper) : bien plus naturelle, entièrement hors ligne et privée. Téléchargement unique de ${size}.</p>
+    <p><b>Voix du navigateur</b> : immédiate, qualité variable selon l'appareil.</p><p class="hint">Modifiable à tout moment dans la barre de lecture ou les Réglages.</p>`,
+  [["cancel", "Annuler"], ["browser", "Voix du navigateur"], ["piper", "Voix neuronale", true]]);
+  if (c === "piper") { applyVoiceKey(`piper:${prefs.piperVoice}:${prefs.piperSpeaker}`); return true; }
+  if (c === "browser") { applyVoiceKey(`browser:${prefs.voice}`); return true; }
+  return false;
+}
+
+// Lit la note : depuis l'endroit affiché, un élément (from) ou une sélection (range).
+async function startReading(tab, opts = {}) {
+  if (!(await chooseEngineOnce())) return;
+  if (!(await confirmVoice(voiceKey()))) return;
+  if (tab.rendered) await tab.rendered;
+  reader.configure(voiceSettings());
+  try { await reader.prepare(progressStatus("Téléchargement de la voix")); }
+  catch (err) { status(err.message, "error"); return; }
+  if (readerTab && readerTab !== tab && readerTab.ui) readerTab.ui.ttsBar.hidden = true;
+  readerTab = tab;
+  fillVoiceSelect(tab.ui.tVoice);
+  tab.ui.tRate.value = String(prefs.rate);
+  if ($("status-msg").textContent.startsWith("Téléchargement de la voix")) status("");
+  reader.start(tab.ui.view, { scroller: tab.ui.scroll, title: baseName(tab.path), ...opts });
+}
+
 function updateTtsBar(state) {
   if (!readerTab?.ui) return;
   const u = readerTab.ui;
@@ -1079,7 +1246,7 @@ function updateRight() {
     return;
   }
   if (!document.body.classList.contains("no-right")) {
-    outlineCleanup = P.outline(o, t.ui.view, t.ui.scroll);
+    outlineCleanup = P.outline(o, t.ui.view, t.ui.scroll, (h) => startReading(t, { from: h }));
     P.backlinks(b, t.path);
     P.infos(i, t.path);
   }
@@ -1178,7 +1345,7 @@ function quickMatches(qRaw, limit = 30) {
 const COMMANDS = [
   ["new", "Nouvelle note", "Ctrl+Maj+N"], ["daily", "Note du jour", "Ctrl+Maj+D"], ["search", "Rechercher dans le contenu", "Ctrl+Maj+F"],
   ["base", "Nouveau tableau (Base)", ""], ["split", "Vue scindée", "Ctrl+\\"], ["edit", "Modifier / lire la note", "Ctrl+E"],
-  ["read", "Lire à voix haute", ""], ["fav", "Ajouter / retirer des favoris", ""], ["close", "Fermer l'onglet", "Alt+W"],
+  ["read", "Lire à voix haute", "Alt+P"], ["night", "Mode nuit (activer / désactiver)", ""], ["fav", "Ajouter / retirer des favoris", ""], ["close", "Fermer l'onglet", "Alt+W"],
   ["right", "Afficher / masquer le panneau de droite", ""], ["side", "Afficher / masquer la barre latérale", ""],
   ["reload", "Recharger le carnet", ""], ["settings", "Réglages", ""], ["keys", "Raccourcis clavier", "?"], ["lock", "Verrouiller", ""],
 ];
@@ -1246,6 +1413,7 @@ async function runCommand(cmd, ev = {}) {
     case "split": return toggleSplit();
     case "edit": if (t?.kind === "note") { if (t.editing) { if (!t.dirty) { stopEditUi(t); renderNote(t); } } else startEdit(t); } return;
     case "read": if (t?.kind === "note" && !t.editing) startReading(t); return;
+    case "night": return toggleNight();
     case "fav": return toggleFavorite(t?.path);
     case "close": return t && closeTab(t);
     case "right": prefs.right = !prefs.right; savePrefs(); updateRight(); if (narrow()) document.body.classList.toggle("right-open", prefs.right); return;
@@ -1272,6 +1440,8 @@ function showKeys() {
     ["Ctrl+E", "Modifier / lire"], ["Ctrl+S", "Enregistrer"], ["Ctrl+Maj+N", "Nouvelle note"], ["Ctrl+Maj+D", "Note du jour"],
     ["Ctrl+\\", "Vue scindée"], ["Alt+W", "Fermer l'onglet"], ["Alt+, / Alt+;", "Onglet précédent / suivant"], ["Alt+← / Alt+→", "Note précédente / suivante"],
     ["Ctrl+clic, clic molette", "Ouvrir dans un nouvel onglet"], ["Maj+clic", "Ouvrir dans l'autre panneau"],
+    ["Alt+P", "Lecture à voix haute : lire / pause"], ["Alt+J / Alt+L", "Phrase précédente / suivante (avec Maj : paragraphe)"], ["Alt+K", "Arrêter la lecture"],
+    ["Alt+clic", "Lire à partir de ce paragraphe (pendant la lecture, un simple clic suffit)"],
     ["Dans l'éditeur", "Ctrl+B gras · Ctrl+I italique · Ctrl+L case · Ctrl+K lien · [[ complétion · Tab indenter · Entrée continue la liste"],
   ];
   ask("Raccourcis clavier", `<table class="keys">${rows.map(([k, v]) => `<tr><td><kbd>${esc(k)}</kbd></td><td>${esc(v)}</td></tr>`).join("")}</table>`, [["ok", "Fermer", true]], { wide: true });
@@ -1279,12 +1449,15 @@ function showKeys() {
 
 // ---------- réglages ----------
 async function openSettings() {
-  const voices = TTS.voices();
   const opt = (v, l, cur) => `<option value="${esc(v)}"${String(cur) === String(v) ? " selected" : ""}>${esc(l)}</option>`;
-  const res = await ask("Réglages", `
+  await refreshPiperState();
+  const pending = ask("Réglages", `
     <div class="settings">
       <fieldset><legend>Apparence (cet appareil)</legend>
-        <label>Thème <select name="theme">${[["auto", "Automatique"], ["light", "Clair"], ["dark", "Sombre"], ["sepia", "Sépia"]].map(([v, l]) => opt(v, l, prefs.theme)).join("")}</select></label>
+        <label>Thème <select name="theme">${[["auto", "Selon le système"], ["light", "Clair"], ["dark", "Sombre"], ["sepia", "Sépia"], ["night", "Nuit"]].map(([v, l]) => opt(v, l, prefs.theme)).join("")}</select></label>
+        <div class="night-row"><label class="check"><input type="checkbox" name="nightAuto"${prefs.nightAuto ? " checked" : ""}> Nuit automatique</label>
+          <span>de <input name="nightFrom" type="time" value="${esc(prefs.nightFrom)}" aria-label="Début de la nuit"> à <input name="nightTo" type="time" value="${esc(prefs.nightTo)}" aria-label="Fin de la nuit"></span></div>
+        <label>Luminosité la nuit <input name="nightDim" type="range" min="0" max="0.6" step="0.05" value="${prefs.nightDim}"></label>
         <label>Police de lecture <select name="font">${[["sans", "Sans empattement"], ["serif", "Avec empattement"], ["mono", "Machine à écrire"]].map(([v, l]) => opt(v, l, prefs.font)).join("")}</select></label>
         <label>Taille du texte <input name="size" type="number" min="12" max="28" value="${prefs.size}"> px</label>
         <label>Largeur de lecture <select name="width">${[[620, "Étroite"], [760, "Normale"], [920, "Large"], [4000, "Pleine largeur"]].map(([v, l]) => opt(v, l, prefs.width)).join("")}</select></label>
@@ -1297,11 +1470,13 @@ async function openSettings() {
         <label>Modèle (nom d'une note, facultatif) <input name="dtemplate" type="text" value="${esc(priv.daily.template || "")}" placeholder="Modèles/Journal"></label>
         <p class="hint">Dans le modèle, <code>{{date}}</code> est remplacé par le nom de la note.</p>
       </fieldset>
-      <fieldset><legend>Lecture à voix haute</legend>
-        ${TTS.supported() ? `<label>Voix <select name="voice">${opt("", "Voix française par défaut", prefs.voice)}${voices.map((v) => opt(v.name, `${v.name} (${v.lang})${v.localService ? "" : " · en ligne"}`, prefs.voice)).join("")}</select></label>
-        <label>Vitesse <select name="rate">${[0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2].map((r) => opt(r, "×" + r, prefs.rate)).join("")}</select></label>
-        <p class="hint">Les voix marquées « en ligne » envoient le texte au service du navigateur : préfère une voix locale pour les notes sensibles.</p>`
-        : `<p class="hint">Non disponible dans ce navigateur.</p>`}
+      <fieldset class="tts-settings"><legend>Lecture à voix haute</legend>
+        <label>Voix <select name="ttsVoice" class="set-voice"></select></label>
+        <label>Vitesse <select name="rate">${RATES.map((r) => opt(r, "×" + r, prefs.rate)).join("")}</select></label>
+        <label>Tonalité (voix du navigateur) <select name="pitch">${[[0.8, "Plus grave"], [0.9, "Un peu grave"], [1, "Normale"], [1.1, "Un peu aiguë"], [1.2, "Plus aiguë"]].map(([v, l]) => opt(v, l, prefs.pitch)).join("")}</select></label>
+        <div class="piper-list"><p class="hint">Voix neuronales…</p></div>
+        <p class="hint">Les voix neuronales sont calculées sur cet appareil. Les voix du navigateur marquées « en ligne » envoient le texte à l'éditeur du navigateur.</p>
+        <button type="button" class="try-voice">▶ Écouter un exemple</button>
       </fieldset>
       <fieldset><legend>Sécurité (cet appareil)</legend>
         <label>Verrouiller après <input name="lockMinutes" type="number" min="1" max="600" value="${prefs.lockMinutes}"> min d'inactivité</label>
@@ -1310,21 +1485,71 @@ async function openSettings() {
         <label class="check"><input type="checkbox" name="clearCache"> Vider le cache hors ligne (fichiers chiffrés)</label>
       </fieldset>
     </div>`, [["cancel", "Annuler"], ["ok", "Appliquer", true]], { input: true, wide: true });
+  wireTtsSettings();
+  const res = await pending;
   if (res.choice !== "ok") return;
   const num = (v, d, a, b) => { const n = Number(v); return Number.isFinite(n) ? Math.min(b, Math.max(a, n)) : d; };
   Object.assign(prefs, {
     theme: res.theme, font: res.font, size: num(res.size, 17, 12, 28), width: Number(res.width), line: Number(res.line),
     lockMinutes: num(res.lockMinutes, 30, 1, 600), hiddenLockMinutes: num(res.hiddenLockMinutes, 5, 0, 600),
-    voice: res.voice ?? prefs.voice, rate: Number(res.rate ?? prefs.rate),
+    rate: Number(res.rate ?? prefs.rate), pitch: Number(res.pitch ?? prefs.pitch),
+    nightAuto: res.nightAuto, nightFrom: res.nightFrom || "21:00", nightTo: res.nightTo || "07:00", nightDim: Number(res.nightDim || 0), nightOverride: null,
   });
+  if (res.ttsVoice && res.ttsVoice !== voiceKey() && await confirmVoice(res.ttsVoice)) applyVoiceKey(res.ttsVoice);
   savePrefs();
+  syncRateSelects();
+  reader.configure(voiceSettings());
   priv.daily = { folder: res.dfolder.trim(), format: res.dformat.trim() || "AAAA-MM-JJ", template: res.dtemplate.trim() };
   savePriv();
   if (res.forgetToken) store.forgetToken();
   if (res.clearCache && "caches" in window) { await caches.delete("carnet-donnees"); status("Cache hors ligne vidé."); }
   else status("Réglages appliqués.");
 }
-TTS.onVoicesChanged(() => {});
+TTS.onVoicesChanged(() => { for (const t of allTabs()) if (t.ui?.tVoice) fillVoiceSelect(t.ui.tVoice); });
+
+// Réglages ouverts : liste des voix Piper (télécharger, supprimer) et bouton d'essai.
+function wireTtsSettings() {
+  const box = $("dlg-body");
+  const sel = box.querySelector(".set-voice");
+  fillVoiceSelect(sel);
+  const list = box.querySelector(".piper-list");
+  const draw = () => {
+    list.innerHTML = "";
+    for (const v of TTS.PIPER_VOICES) {
+      const ready = piperState?.voices?.[v.id];
+      const row = el("div", { className: "piper-row" }, el("span", { textContent: v.label + (v.speakers ? " (Jessica, Pierre)" : "") }),
+        el("span", { className: "hint", textContent: ready ? "téléchargée" : piperState ? mo(piperState.sizes[v.id]) : "" }));
+      const b = el("button", { type: "button", textContent: ready ? "Supprimer" : "Télécharger" });
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          if (ready) await TTS.piperCall({ type: "delete", voice: v.id });
+          else await TTS.piperCall({ type: "load", voice: v.id }, (l, t) => { b.textContent = `${Math.round((l / t) * 100)} %`; });
+        } catch (err) { status(err.message, "error"); }
+        await refreshPiperState();
+        draw();
+        fillVoiceSelect(sel);
+      });
+      row.append(b);
+      list.append(row);
+    }
+  };
+  draw();
+  box.querySelector(".try-voice").addEventListener("click", async () => {
+    const key = sel.value;
+    if (!(await confirmVoice(key))) return;
+    const keep = voiceKey();
+    applyVoiceKey(key);
+    const sample = el("div", {}, el("p", { textContent: "Bonjour. Voici un exemple de lecture à voix haute du carnet, en 2026." }));
+    reader.configure({ ...voiceSettings(), rate: Number(box.querySelector('select[name="rate"]').value), pitch: Number(box.querySelector('select[name="pitch"]').value) });
+    try { await reader.prepare(progressStatus("Téléchargement de la voix")); } catch (err) { status(err.message, "error"); return; }
+    await refreshPiperState(); draw();
+    applyVoiceKey(keep);
+    if (readerTab?.ui) readerTab.ui.ttsBar.hidden = true;
+    readerTab = null;
+    reader.start(sample, { title: "Essai" });
+  });
+}
 
 // ---------- clics sur les liens, tags, raccourcis ----------
 function linkWhere(ev) { return ev.shiftKey ? "other" : ev.ctrlKey || ev.metaKey || ev.button === 1 ? "tab" : "here"; }
@@ -1370,6 +1595,12 @@ document.addEventListener("keydown", (ev) => {
     if (tabs.length > 1) activateTab(tabs[(i + (ev.key === ";" ? 1 : -1) + tabs.length) % tabs.length]);
   }
   else if (ev.altKey && (ev.key === "ArrowLeft" || ev.key === "ArrowRight") && !inField) { ev.preventDefault(); if (t?.kind === "note") goHistory(t, ev.key === "ArrowLeft" ? -1 : 1); }
+  else if (ev.altKey && !mod && !inField && ["p", "j", "l", "k"].includes(k)) {
+    ev.preventDefault();
+    if (k === "p") { if (reader.state === "stopped") { if (t?.kind === "note" && !t.editing) startReading(t); } else reader.toggle(); }
+    else if (k === "k") reader.stop();
+    else reader.skip(k === "j" ? -1 : 1, ev.shiftKey ? "block" : "sentence");
+  }
   else if (ev.key === "?" && !inField) showKeys();
   else if (ev.key === "Escape") { document.body.classList.remove("side-open", "right-open"); closeMenu(); }
 });

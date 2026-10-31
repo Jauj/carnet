@@ -70,6 +70,15 @@ Intégration : ![[Sous-dossier/Note profonde#Section A]]
   "Rubbish/exclue.md": "ne doit pas apparaître",
   "02 Notes/02_06 Personnel/API.md": "ne doit pas apparaître",
 };
+// Vault lourd (CARNET_E2E_LOURD=1) : 300 notes, dont 30 textes d'environ 1 Mo, pour mesurer les performances.
+if (process.env.CARNET_E2E_LOURD) {
+  const mots = "la révolution française fut un moment décisif où les ouvriers et les paysans se soulevèrent contre l'ordre ancien État Œuvre classe commune pouvoir".split(" ");
+  let seed = 42;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const texte = (n) => { let t = ""; let k = 0; while (t.length < n) { t += mots[Math.floor(rnd() * mots.length)] + (rnd() < 0.08 ? ". " : " "); if (++k % 900 === 0) t += `\n\n## Partie ${k / 900}\n\n`; } return t; };
+  for (let i = 0; i < 270; i++) notes[`Lourd/Notes/Note ${i}.md`] = `# Note ${i}\n\n${texte(3000)}\n`;
+  for (let i = 0; i < 30; i++) notes[`Lourd/Livres/Livre ${i}.md`] = `# Livre ${i}\n\n${texte(1_000_000)}\n`;
+}
 for (const [p, c] of Object.entries(notes)) {
   const abs = path.join(vault, ...p.split("/"));
   fs.mkdirSync(path.dirname(abs), { recursive: true });

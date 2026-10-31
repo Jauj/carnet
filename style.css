@@ -26,6 +26,18 @@
   --bg: #f4ecd8; --bg2: #ece2c9; --bg3: #e3d7ba; --fg: #3b2f20; --muted: #75664f; --faint: #9a8a6f;
   --line: #ddd0b2; --line2: #cfc09e; --accent: #8a3a1e; --accent-soft: #ead8bf; --code: #e9dfc4; --mark: #f1d98a; --hit: #f0b84e;
 }
+:root[data-theme="night"] {
+  /* Nuit : noir, texte ambré, aucune lumière bleue vive ; contrastes adoucis. */
+  --bg: #000; --bg2: #0a0705; --bg3: #15100b; --fg: #d8a56c; --muted: #a07a52; --faint: #6f5539;
+  --line: #24190f; --line2: #352617; --accent: #d9743c; --accent-fg: #000; --accent-soft: #2a1408;
+  --code: #110b07; --mark: #4a2c08; --hit: #6e420e; --warn: #2a1a06; --err: #e0703c; --ok: #a8a050;
+  --c-info: #b0884f; --c-tip: #a39a55; --c-ok: #a8a050; --c-warn: #d08a3c; --c-bad: #d9643c; --c-ex: #b08066; --c-quote: #8c7058;
+  --shadow: 0 8px 28px rgba(0, 0, 0, .8);
+  color-scheme: dark;
+}
+:root[data-theme="night"] .lock { background: #000; }
+/* Luminosité réglable la nuit : un voile noir fixe, sans coût de rendu. */
+body::after { content: ""; position: fixed; inset: 0; background: #000; opacity: var(--night-dim, 0); pointer-events: none; z-index: 1000; }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="auto"] {
     --bg: #1c1c1f; --bg2: #232327; --bg3: #2c2c31; --fg: #e8e6e1; --muted: #a29f97; --faint: #77746d;
@@ -370,3 +382,28 @@ dialog.qs input { width: 100%; border: 0; border-bottom: 1px solid var(--line); 
   .tabview { position: static; }
   .doc-scroll { overflow: visible; }
 }
+
+/* ---------- lecture à voix haute, plan, réglages ---------- */
+.tts-bar { flex-wrap: wrap; row-gap: 4px; }
+.tts-bar .tts-voice { max-width: 260px; }
+.tts-hint { margin-left: auto; font-size: 11.5px; }
+:root[data-theme="night"] ::highlight(tts) { background: #6e420e; color: #f2c08a; }
+.ol-row { display: flex; align-items: center; }
+.ol-row .ol-item { flex: 1; min-width: 0; }
+.ol-read { border: 0; padding: 0 6px; font-size: 10px; color: var(--faint); opacity: 0; }
+.ol-row:hover .ol-read, .ol-read:focus { opacity: 1; }
+.ol-read:hover { color: var(--accent); background: transparent; }
+.piper-list { display: grid; gap: 4px; margin: 6px 0; }
+.piper-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; font-size: 13px; }
+.piper-row button { padding: 2px 8px; font-size: 12px; }
+.settings select.set-voice { max-width: 62%; }
+.settings input[type=time] { width: auto; padding: 2px 4px; }
+.settings input[type=range] { width: 45%; accent-color: var(--accent); }
+.snip.pending { color: var(--faint); }
+@media (max-width: 900px) { .tts-hint { display: none; } }
+.settings fieldset { min-width: 0; }
+.settings label > select, .settings label > input[type=text] { min-width: 0; max-width: 62%; }
+.settings label > span:first-child { flex: none; }
+.night-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; margin: 8px 0 3px; font-size: 13px; }
+.night-row label.check { margin: 0; }
+dialog.wide { width: min(860px, calc(100% - 32px)); }

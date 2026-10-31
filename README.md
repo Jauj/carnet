@@ -28,17 +28,28 @@ Un vault Obsidian (les notes `.md` seulement) lisible et modifiable depuis n'imp
 4. **Lire** :
    - les propriétés, les callouts (repliables), `==surlignage==`, les `#tags` et les notes intégrées `![[…]]` sont mis en forme ;
    - les cases à cocher se cochent directement (enregistrement immédiat) ;
-   - **lecture à voix haute** (icône haut-parleur) : depuis l'endroit affiché, phrase par phrase et surlignée, avec la voix et la vitesse au choix ;
+   - **lecture à voix haute** (icône haut-parleur, ou Alt+P) : voir plus bas ;
    - les pièces jointes (PDF, images) ne sont pas synchronisées.
 5. **Modifier ou créer** (Ctrl+E, Ctrl+Maj+N, **note du jour** Ctrl+Maj+D) : enregistrer avec Ctrl+S.
    - Dans l'éditeur : complétion des `[[liens]]` et `[[note#section]]`, listes continuées par Entrée, Tab pour indenter, aperçu à côté.
    - Le brouillon est gardé, chiffré, toutes les 5 secondes, puis proposé au déverrouillage suivant en cas de fermeture.
    - Le menu ⋯ d'une note permet de la **renommer, la déplacer ou la supprimer**. Sur le PC, une note supprimée va dans la corbeille du carnet, et les liens ne sont pas renommés.
    - Au premier enregistrement sur un appareil, la page demande un **jeton GitHub** (voir plus bas). Option « Mémoriser » : le jeton est gardé dans le navigateur, **chiffré** avec la phrase de passe.
-6. **Base** : des tableaux de notes filtrés par dossier, tag ou propriété, avec un tri par colonne, l'export en CSV et des vues enregistrées.
-7. **Réglages** (roue dentée) : thème (clair, sombre, sépia), police, taille, largeur, note du jour, voix, délais de verrouillage, cache hors ligne.
-8. **Appli** : la page s'installe sur l'écran d'accueil ou comme application. Les notes déjà lues restent consultables hors ligne (seuls des fichiers chiffrés sont gardés).
-9. **Verrouiller** : la page se verrouille aussi seule après 30 minutes d'inactivité, ou 5 minutes en arrière-plan (sauf pendant une lecture à voix haute). *Maj + clic* sur le cadenas oublie le jeton mémorisé sur cet appareil.
+6. **Lecture à voix haute** :
+   - **Où démarrer** : à l'endroit affiché ; la **sélection** seulement, si du texte est sélectionné ; **Alt+clic** sur un paragraphe ; **▶** devant un titre du plan. Pendant la lecture, un simple clic sur un paragraphe y fait sauter.
+   - **Barre de lecture** : paragraphe ±, phrase ±, pause, arrêt (Maj+clic sur les flèches de paragraphe : section ±). La **voix** et la **vitesse** se changent en direct.
+   - **Raccourcis** : Alt+P lire/pause, Alt+J / Alt+L phrase (avec Maj : paragraphe), Alt+K arrêt. Avec Piper, les **touches média** (clavier, casque, écran verrouillé) fonctionnent aussi.
+   - **Voix neuronales Piper** (Siwis, Tom, UPMC Jessica et Pierre, Siwis légère) :
+     - bien plus naturelles, calculées **sur l'appareil** : le texte ne sort jamais ;
+     - téléchargées une seule fois (moteur environ 30 Mo et 28 à 77 Mo par voix), puis disponibles hors ligne ;
+     - les fichiers sont figés et **vérifiés par empreinte SHA-256 avant usage** : moteur depuis jsDelivr, voix depuis le dépôt officiel `rhasspy/piper-voices` ;
+     - gestion des voix dans les Réglages.
+   - **Voix du navigateur** : immédiates. Celles marquées « en ligne » (Edge « Natural », Google) envoient le texte à l'éditeur du navigateur ; la page demande une fois ton accord.
+7. **Base** : des tableaux de notes filtrés par dossier, tag ou propriété, avec un tri par colonne, l'export en CSV et des vues enregistrées.
+8. **Mode nuit** (lune du ruban) : fond noir, texte ambré, lumière bleue réduite. Dans les Réglages : luminosité, et bascule automatique selon l'heure (par exemple de 21 h à 7 h). La lune force le mode jour ou nuit jusqu'à la prochaine bascule.
+9. **Réglages** (roue dentée) : thème (clair, sombre, sépia, nuit), police, taille, largeur, note du jour, voix, délais de verrouillage, cache hors ligne.
+10. **Appli** : la page s'installe sur l'écran d'accueil ou comme application. Les notes déjà lues restent consultables hors ligne (seuls des fichiers chiffrés sont gardés).
+11. **Verrouiller** : la page se verrouille aussi seule après 30 minutes d'inactivité, ou 5 minutes en arrière-plan (sauf pendant une lecture à voix haute). *Maj + clic* sur le cadenas oublie le jeton mémorisé sur cet appareil.
 
 Tous les raccourcis : touche `?`.
 
@@ -118,7 +129,7 @@ L'ancienne branche `data` de `Jauj/carnet` n'est plus lue. Tu peux la supprimer 
 
   Les messages de commit ne contiennent jamais de nom de note.
 - **La page refuse d'être affichée dans le cadre d'un autre site** (protection contre le clickjacking). GitHub Pages ne permet pas l'en-tête `frame-ancestors`, donc c'est la page qui vérifie.
-- **La page ne charge rien d'extérieur** :
+- **La page ne charge rien d'extérieur**, sauf les fichiers des voix neuronales Piper, à la demande. Ils sont chargés dans un *worker*, et leurs empreintes sont vérifiées avant usage :
   - les bibliothèques sont copiées dans `vendor/`. Leur empreinte est vérifiée par les tests, et une action GitHub mensuelle ouvre une issue quand une nouvelle version sort ;
   - la politique CSP n'autorise que `api.github.com` et `raw.githubusercontent.com` ;
   - aucune image externe n'est chargée ;
@@ -133,7 +144,7 @@ Chaque enregistrement est un commit de la branche `data`. On peut donc revenir �
 
 ## Tests
 
-`node --test test/*.test.mjs` lance 38 tests :
+`node --test test/*.test.mjs` lance 45 tests :
 - chiffrement ;
 - contrôles d'échec ;
 - scénarios de synchronisation à deux appareils ;
@@ -142,7 +153,10 @@ Chaque enregistrement est un commit de la branche `data`. On peut donc revenir �
 - empreintes des bibliothèques de `vendor/` ;
 - analyse des notes (frontmatter, tags, liens, tâches), index et requêtes de recherche, rendu des cases à cocher.
 
-`node test/e2e-ui.cjs` teste toute l'interface dans Chromium (Playwright requis) : recherche, Base, vue scindée, édition, brouillons, lecture à voix haute, hors ligne.
+Dans Chromium (Playwright requis) :
+- `node test/e2e-ui.cjs` teste toute l'interface : recherche, Base, vue scindée, édition, brouillons, lecture à voix haute, mode nuit, hors ligne ;
+- `node test/e2e-perf.cjs` vérifie, sur un gros vault (30 textes de 1 Mo), qu'aucune tâche ne fige la page plus de 250 ms ;
+- `node test/e2e-piper.cjs` télécharge une vraie voix Piper et vérifie que le texte ne part jamais sur le réseau.
 
 Pour tester la page en local :
 - `node test/e2e-setup.mjs <dossier>` prépare un vault de démonstration ;

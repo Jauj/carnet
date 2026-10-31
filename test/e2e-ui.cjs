@@ -129,11 +129,64 @@ async function main() {
     step("brouillon repris, suppression");
 
     await goTo("long texte");
+    const spoken = () => page.evaluate(() => window.__spoken.slice());
+    const reset = () => page.evaluate(() => (window.__spoken = []));
+    await page.click(cur + " .b-tts");
+    await page.click("#dlg button[value=browser]"); // premier usage : voix du navigateur (simulée ici)
+    await page.waitForFunction(() => window.__spoken.length >= 3);
+    assert.deepEqual((await spoken()).slice(0, 3), ["Long texte", "Chapitre 1", "La révolution de 1789 fut un moment décisif."]);
+    // Paragraphe suivant, vitesse changée en direct, arrêt
+    await reset();
+    await page.click(cur + ' .tts-bar button[title^="Paragraphe suivant"]');
+    await page.waitForFunction(() => window.__spoken.length >= 1);
+    await page.selectOption(cur + " .tts-bar select[title=Vitesse]", "1.5");
+    await page.waitForTimeout(200);
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("carnet.prefs")).rate), 1.5);
+    await page.click(cur + ' .tts-bar button[title^="Arrêter"]');
+    // Alt+clic sur un paragraphe : lecture à partir de là
+    await reset();
+    await page.click(cur + " .note p:has-text('1795 fut')", { modifiers: ["Alt"] });
+    await page.waitForFunction(() => window.__spoken.length >= 1);
+    assert.match((await spoken())[0], /^La révolution de 1795/);
+    // Pendant la lecture, un clic simple fait sauter
+    await reset();
+    await page.click(cur + " .note p:has-text('1800 fut')");
+    await page.waitForFunction(() => window.__spoken.some((t) => /1800/.test(t)));
+    await page.keyboard.press("Alt+k");
+    // ▶ du plan
+    await reset();
+    await page.hover("#r-outline .ol-row:has-text('Chapitre 30')");
+    await page.click("#r-outline .ol-row:has-text('Chapitre 30') .ol-read");
+    await page.waitForFunction(() => window.__spoken.length >= 1);
+    assert.equal((await spoken())[0], "Chapitre 30");
+    await page.keyboard.press("Alt+k");
+    // Lire la sélection seulement
+    await reset();
+    await page.evaluate(() => {
+      const p = [...document.querySelectorAll(".pane.active .tabview:not([hidden]) .note p")].find((x) => x.textContent.includes("1792 fut"));
+      const r = document.createRange(); r.selectNodeContents(p); getSelection().removeAllRanges(); getSelection().addRange(r);
+    });
     await page.click(cur + " .b-tts");
     await page.waitForFunction(() => window.__spoken.length >= 3);
-    assert.deepEqual(await page.evaluate(() => window.__spoken.slice(0, 3)), ["Long texte", "Chapitre 1", "La révolution de 1789 fut un moment décisif."]);
-    await page.click(cur + " .tts-bar button[title=Arrêter]");
-    step("lecture à voix haute");
+    await page.waitForTimeout(400);
+    const sel = await spoken();
+    assert.ok(sel.every((t) => /1792|ouvriers|Phrase numéro 3/.test(t)), JSON.stringify(sel));
+    step("lecture à voix haute : sélection, Alt+clic, saut, vitesse, plan");
+
+    // Mode nuit : bouton lune, puis programmation (horloge simulée)
+    await page.click(".rb[data-cmd=night]");
+    assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "night");
+    await page.click(".rb[data-cmd=night]");
+    assert.notEqual(await page.evaluate(() => document.documentElement.dataset.theme), "night");
+    await page.evaluate(() => { const p = JSON.parse(localStorage.getItem("carnet.prefs")); Object.assign(p, { nightAuto: true, nightFrom: "21:00", nightTo: "07:00", nightOverride: null }); localStorage.setItem("carnet.prefs", JSON.stringify(p)); });
+    await page.clock.setFixedTime(new Date(2026, 9, 31, 23, 0));
+    await page.reload();
+    assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "night");
+    await page.clock.setFixedTime(new Date(2026, 9, 31, 12, 0));
+    await page.reload();
+    assert.notEqual(await page.evaluate(() => document.documentElement.dataset.theme), "night");
+    await unlock();
+    step("mode nuit : bouton et programmation horaire");
 
     await page.waitForFunction(() => navigator.serviceWorker?.controller);
     await page.reload(); // les fichiers chiffrés passent maintenant par le service worker

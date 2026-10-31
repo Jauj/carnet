@@ -167,7 +167,9 @@ export async function readNote(path) {
   const cached = S.cache.get(path);
   if (cached && cached.sha === e.sha) return cached;
   const bytes = await C.decryptBytes(S.keys.enc, await raw(S.ref, C.noteFile(e.id)), C.noteAad(e.id));
-  const note = { path, sha: e.sha, valid: C.isValidUtf8(bytes), text: C.fromUtf8(bytes) };
+  let text, valid = true;
+  try { text = C.fromUtf8(bytes, { fatal: true }); } catch { valid = false; text = C.fromUtf8(bytes); }
+  const note = { path, sha: e.sha, valid, text };
   S.cache.set(path, note);
   return note;
 }
